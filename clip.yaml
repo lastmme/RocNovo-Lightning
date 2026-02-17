@@ -1,0 +1,72 @@
+aug:
+  enabled: true
+  prob: 0.5
+  removal_rate: 0.2
+  removal_intensity_threshold: 0.3
+  perturbation_rate: 0.15
+
+tokenizer:
+  spectrum:
+    n_top_peaks: 300
+    min_mz: 50.0
+    max_mz: 4500.0
+    min_intensity: 0.01
+    remove_precursor_tol: 2.0
+  
+  peptide:
+    reverse: true
+    residues: "massivekb"
+
+model:
+  spectrum:
+    hidden_size: 512
+    n_head: 8
+    n_layers: 9
+    dropout: 0.18
+    dim_feedforward: 1024
+  
+  peptide:
+    n_vocab: 29
+    hidden_size: 512
+    n_head: 8
+    n_layers: 9
+    dropout: 0.18
+    dim_feedforward: 1024
+  
+  logits_scale: 0.05
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  enabled: true
+  n_cycles: 1
+  warmup_steps: 9000
+  lr_decay_factor: 1.0
+
+trainer:
+  is_max: true
+  evaluate_metric_name: "top1_accuracy"
+  task_name: "clip"
+  random_seed: 4545
+  save_top_k: 3
+  max_epochs: 10
+  devices: [0, 1]
+  grad_norm_clip: 1.5
+  validation_steps: 20000
+  show_progress_bar: true
+  grad_scaler_enable: true
+  distributed: "ddp"
+  gradient_accumulation_steps: 1
+  summarywriter_folder: "/data2/xp/RocNovo-Lightning/outputs/tb"
+  model_save_folder: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/clip"
+
+data:
+  train_path: "/data2/xp/data/massive/train_massive.hdf5"
+  val_path: "/data2/xp/data/massive/valid_massive.hdf5"
+  test_path: "/data2/xp/data/massive/test_massive.hdf5"
+  train_batch_size: 300
+  val_batch_size: 300
+  test_batch_size: 256
+  n_workers: 16
