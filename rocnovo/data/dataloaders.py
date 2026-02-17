@@ -116,8 +116,7 @@ class SpectraDataLoaderModule(BaseDataModule):
         self.custom_collatefn = spectra_collate_fn
         
         self.spectrum_tokenizer = spectrum_tokenizer
-        spectrum_tokenizer_val = copy(spectrum_tokenizer)
-        spectrum_tokenizer_val.disable_aug()
+        self.spectrum_tokenizer.disable_aug()
         
         if self.data_config.train_path != "" and Path(self.data_config.train_path).exists():
             self.train_dataset = SpectrumStream(
@@ -128,13 +127,13 @@ class SpectraDataLoaderModule(BaseDataModule):
         if self.data_config.val_path != "" and Path(self.data_config.val_path).exists():
             self.val_dataset = SpectrumStream(
                 self.data_config.val_path,
-                spectrum_tokenizer_val
+                spectrum_tokenizer
             )
         
         if self.data_config.test_path != "" and Path(self.data_config.test_path).exists():
             self.test_dataset = SpectrumStream(
                 self.data_config.test_path,
-                spectrum_tokenizer_val
+                spectrum_tokenizer
             )
 
 class DeNovoDataLoaderModule(BaseDataModule):
@@ -143,7 +142,8 @@ class DeNovoDataLoaderModule(BaseDataModule):
         self.custom_collatefn = denovo_collate_fn
         
         self.spectrum_tokenizer = spectrum_tokenizer
-        self.spectrum_tokenizer.disable_aug()
+        spectrum_tokenizer_val = copy(spectrum_tokenizer)
+        spectrum_tokenizer_val.disable_aug()
         
         self.peptide_tokenizer = peptide_tokenizer
         if self.data_config.train_path != "" and Path(self.data_config.train_path).exists():
@@ -156,14 +156,14 @@ class DeNovoDataLoaderModule(BaseDataModule):
         if self.data_config.val_path != "" and Path(self.data_config.val_path).exists():
             self.val_dataset = DeNovoStream(
                 self.data_config.val_path,
-                self.spectrum_tokenizer,
+                spectrum_tokenizer_val,
                 self.peptide_tokenizer
             )
         
         if self.data_config.test_path != "" and Path(self.data_config.test_path).exists():
             self.test_dataset = DeNovoStream(
                 self.data_config.test_path,
-                self.spectrum_tokenizer,
+                spectrum_tokenizer_val,
                 self.peptide_tokenizer
             )
 
