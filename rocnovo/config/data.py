@@ -62,12 +62,20 @@ class TrainBatch:
         return replace(
             self,
             spectra=self.spectra.to(device),
-            peptide=self.peptide.to(device),
+            peptide=self.peptide.to(device)
         )
 
 @dataclass(frozen=True)
 class BidirectTrainBatch(TrainBatch):
-    reverse_peptide: Peptide
+    peptide_reverse: Peptide
+
+    def to(self, device: torch.device):
+        return replace(
+            self,
+            spectra=self.spectra.to(device),
+            peptide=self.peptide.to(device),
+            peptide_reverse=self.peptide_reverse.to(device)
+        )
 
 @dataclass(frozen=True)
 class InferenceBatch:

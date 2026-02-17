@@ -52,4 +52,8 @@ class Output:
     hidden_states: list[torch.Tensor]
     cache: Optional[Cache]=None
 
+@dataclass(frozen=True)
+class DecoderOutput(Output):
+    logits: Optional[torch.Tensor] = None
+
 default_output_config = OutputConfig()

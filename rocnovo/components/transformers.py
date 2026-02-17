@@ -108,9 +108,12 @@ class WordEmbedding(nn.Module):
             padding_idx=pad_token_id
         )
 
+    def embed(self, tokens: torch.LongTensor):
+        return self.aa_encoder(tokens)
+
     def forward(
         self,
-        tokens: torch.FloatTensor,
+        tokens: torch.LongTensor,
         precursor: data_config.Precursor,
         prompt_hidden_states: Optional[torch.FloatTensor]=None
     ):
@@ -122,7 +125,7 @@ class WordEmbedding(nn.Module):
             dim=-1
         )
         
-        aa_hidden_states = self.aa_encoder(tokens)
+        aa_hidden_states = self.embed(tokens)
         aa_hidden_states[:, 0, :] = precursor_hidden_states.squeeze(dim=1)
         hidden_states = aa_hidden_states
         # 插入 prompt_hidden_states
@@ -188,11 +191,13 @@ class SelfAttention(nn.Module):
             elif attention_mask.dim() == 3:
                 attention_mask = attention_mask[:, None, :, :]
         
-        is_inference = (q.size(-2) != k.size(-2))
+        q_len = q.size(-2)
+        k_len = k.size(-2)
+        is_decoding_step = (q_len == 1 and k_len > 1)
         atten_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attention_mask if not self.is_causal else None,
-            is_causal=self.is_causal and is_inference,
+            is_causal=self.is_causal and not is_decoding_step,
             dropout_p=self.dropout if self.training else 0.0
         )
         atten_output = recover_hidden_states(atten_output)
@@ -393,7 +398,7 @@ class EncoderLayer(nn.Module):
         
         self.self_attn = Attention(
             hidden_size,
-            n_head,
+            dropout,
             attn
         )
 
@@ -515,7 +520,6 @@ class DecoderLayer(nn.Module):
         hidden_states: torch.FloatTensor,
         pos_emb: tuple[torch.FloatTensor, torch.FloatTensor],
         mem_hidden_states: torch.FloatTensor,
-        attention_mask: torch.BoolTensor,
         mem_attention_mask: torch.BoolTensor,
         past_key_value: Optional[model_config.KVCache]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
@@ -523,7 +527,6 @@ class DecoderLayer(nn.Module):
         self_attention_outputs: model_config.AttentionOutput = self.self_attn(
             hidden_states=hidden_states,
             pos_emb=pos_emb,
-            attention_mask=attention_mask,
             past_key_value=past_key_value,
             cache_return_config=cache_return_config
         )
@@ -572,7 +575,7 @@ class Decoder(nn.Module):
         mem_attention_mask: Optional[torch.BoolTensor]=None,
         cache: Optional[model_config.Cache]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
-    ):  
+    ):
         key_values_cache = []
         all_hidden_states = []
         for idx, layer in enumerate(self.layers):

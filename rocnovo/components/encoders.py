@@ -5,6 +5,7 @@ import torch.nn as nn
 import einops
 
 from rocnovo.config.data import Spectra
+import rocnovo.config.model as model_config
 from rocnovo.components.float_encoder import FloatEncoder
 from rocnovo.components.transformers import get_activations, Encoder, PeakRotaryPositionalEmbeddings
 
@@ -221,16 +222,16 @@ class RoPESpectrumEncoder(nn.Module):
         )
         self.d_k = hidden_size // n_head
         self.rotary_emb = PeakRotaryPositionalEmbeddings(
-            dim_model=self.d_k,
-            min_wavelength=0.001,
-            max_wavelength=10000
+            self.d_k,
+            0.001,
+            10000
         )
         self.encoder = Encoder(
             n_head,
             n_layers,
             hidden_size,
             dim_feedforward,
-            float,
+            dropout,
             activation
         )
     
@@ -252,9 +253,9 @@ class RoPESpectrumEncoder(nn.Module):
         precursor_positions = torch.zeros(batch_size, 1, device=device)
         positions = torch.cat([precursor_positions, mz_positions], dim=1)
         pos_emb = self.rotary_emb(positions)
-        hidden_states = self.encoder(
+        output: model_config.Output = self.encoder(
             spectra_repr,
             pos_emb,
             mask
         )
-        return hidden_states, mask
+        return output.last_hidden_states, mask
