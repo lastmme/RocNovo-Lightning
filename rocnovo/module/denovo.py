@@ -93,7 +93,7 @@ class Denovo(BaseModule):
 
     def full_peptide_match_accuracy(self, logits: torch.FloatTensor, labels: torch.LongTensor, mask: torch.BoolTensor):
         pred = torch.argmax(logits, dim=-1)
-        matches = ((pred == labels) | mask).all(dim=-1)
+        matches = ((pred == labels) | ~mask).all(dim=-1)
         return torch.mean(matches.float())
 
     def forward(
