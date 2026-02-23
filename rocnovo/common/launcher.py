@@ -141,7 +141,7 @@ def build_trainer(
         val_check_interval=trainer_config.validation_steps,
         devices=trainer_config.devices,
         strategy=trainer_config.distributed if mode == "train" else "auto",
-        precision="bf16-mixed" if trainer_config.grad_scaler_enable else "32",
+        precision="bf16-mixed" if trainer_config.grad_scaler_enable else "32-true",
         gradient_clip_val=trainer_config.grad_norm_clip if trainer_config.grad_norm_clip is not None else None,
         accumulate_grad_batches=trainer_config.gradient_accumulation_steps,
         default_root_dir=trainer_config.model_save_folder,

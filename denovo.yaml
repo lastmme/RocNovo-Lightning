@@ -57,7 +57,7 @@ trainer:
   grad_norm_clip: 1.5
   validation_steps: 50000
   show_progress_bar: true
-  grad_scaler_enable: true
+  grad_scaler_enable: false
   distributed: "ddp"
   gradient_accumulation_steps: 1
   summarywriter_folder: "/data2/xp/RocNovo-Lightning/outputs/tb"
@@ -67,7 +67,7 @@ data:
   train_path: "/data2/xp/data/massive/train_massive.hdf5"
   val_path: "/data2/xp/data/massive/valid_massive.hdf5"
   test_path: "/data2/xp/data/massive/test_massive.hdf5"
-  train_batch_size: 192
-  val_batch_size: 192
+  train_batch_size: 128
+  val_batch_size: 128
   test_batch_size: 256
   n_workers: 16
