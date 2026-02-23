@@ -8,7 +8,7 @@ from rocnovo.components.transformers import WordEmbedding, PeakRotaryPositionalE
 from rocnovo.components.encoders import PositionalEncoder
 from rocnovo.tokenizer.peptide import CANONICAL, SPECIAL_TOKENS, PAD
 import rocnovo.config.model as model_config
-from rocnovo.config.data import Peptide, Precursor
+from rocnovo.config.data import Precursor
 
 class ClipPeptideDecoder(nn.Module):
     def __init__(
@@ -122,11 +122,11 @@ class BiDirectRopeDecoder(nn.Module):
         cache_reverse: Optional[model_config.Cache]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
-        hidden_states = self.word_embedding.embed(tokens)
+        hidden_states: torch.FloatTensor = self.word_embedding.embed(tokens)
         hidden_states_reverse = self.word_embedding.embed(tokens_reverse)
         start_pos = 0
         if cache is not None:
-            start_pos = cache.kv_cache[0].shape[-2]
+            start_pos = cache.kv_cache[0].key.shape[-2]
         
         pos_emb = self.calculate_pos_emb(
             start_pos,
@@ -174,7 +174,8 @@ class BiDirectRopeDecoder(nn.Module):
         precursor: Precursor,
         mem_hidden_states: torch.FloatTensor,
         mem_attention_mask: Optional[torch.BoolTensor]=None,
-        prompt_hidden_states: torch.FloatTensor=None
+        prompt_hidden_states: torch.FloatTensor=None,
+        cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
         hidden_states = self.word_embedding(
             tokens,
@@ -198,13 +199,15 @@ class BiDirectRopeDecoder(nn.Module):
             hidden_states,
             pos_emb,
             mem_hidden_states,
-            mem_attention_mask
+            mem_attention_mask,
+            cache_return_config=cache_return_config
         )
         output_reverse: model_config.Output = self.decoder_reverse(
             hidden_states_reverse,
             pos_emb,
             mem_hidden_states,
-            mem_attention_mask
+            mem_attention_mask,
+            cache_return_config=cache_return_config
         )
 
         logits = self.lm_head(output.last_hidden_states)

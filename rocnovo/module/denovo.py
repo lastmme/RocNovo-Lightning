@@ -69,8 +69,8 @@ class Denovo(BaseModule):
         output: model_config.DecoderOutput
         output_reverse: model_config.DecoderOutput
         output, output_reverse = self.peptide_decoder.decode_with_cache(
-            tokens[:, :-1],
-            tokens_reverse[:, :-1],
+            tokens[:, [-1]],
+            tokens_reverse[:, [-1]],
             mem_hidden_states,
             mem_attention_mask,
             cache,
