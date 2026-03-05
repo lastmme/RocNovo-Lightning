@@ -46,6 +46,7 @@ def recover_hidden_states(hidden_states: torch.FloatTensor):
     hidden_states = hidden_states.view(*shapes, hidden_size)
     return hidden_states
 
+@torch.amp.autocast(device_type="cuda", enabled=False)
 def _apply_rotary_pos_emb(hidden_states: torch.FloatTensor, sinusoidal_pos: tuple[torch.FloatTensor, torch.FloatTensor]):
     cos_emb, sin_emb = sinusoidal_pos
     front, behind = hidden_states.chunk(2, dim=-1)
@@ -81,6 +82,7 @@ class PeakRotaryPositionalEmbeddings(nn.Module):
         inv_freq = freq_min * (scale ** exponent)
         self.register_buffer("inv_freq", inv_freq)
 
+    @torch.amp.autocast(device_type="cuda", enabled=False)
     def forward(self, positions: torch.LongTensor) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         freqs = torch.einsum("bl,d->bld", positions, self.inv_freq)
         return (freqs.cos(), freqs.sin())
