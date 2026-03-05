@@ -73,21 +73,25 @@ class SpectrumTokenizer:
             mz_array.astype(np.float64),
             int_array.astype(np.float32)
         )
-        spectrum.set_mz_range(self.min_mz, self.max_mz)
-        if len(spectrum.mz) == 0:
-            raise ValueError
+        try:
+            spectrum.set_mz_range(self.min_mz, self.max_mz)
+            if len(spectrum.mz) == 0:
+                raise ValueError
+            
+            spectrum.remove_precursor_peak(self.remove_precursor_tol, "Da")
+            if len(spectrum.mz) == 0:
+                raise ValueError
         
-        spectrum.remove_precursor_peak(self.remove_precursor_tol, "Da")
-        if len(spectrum.mz) == 0:
-            raise ValueError
-    
-        spectrum.filter_intensity(self.min_intensity, self.n_top_peaks)
-        if len(spectrum.mz) == 0:
-            raise ValueError
+            spectrum.filter_intensity(self.min_intensity, self.n_top_peaks)
+            if len(spectrum.mz) == 0:
+                raise ValueError
 
-        spectrum.scale_intensity("root", 1)
-        mz, intensities = spectrum.mz, spectrum.intensity
-        if self.aug_config is not None and self.aug_config.enabled and np.random.random() < self.aug_config.prob:
-            mz, intensities = self.aug(mz, intensities)
+            spectrum.scale_intensity("root", 1)
+            mz, intensities = spectrum.mz, spectrum.intensity
+            if self.aug_config is not None and self.aug_config.enabled and np.random.random() < self.aug_config.prob:
+                mz, intensities = self.aug(mz, intensities)
 
-        return torch.tensor(np.array([mz, intensities])).T.float()
+            return torch.tensor(np.array([mz, intensities])).T.float()
+        
+        except ValueError:
+            return torch.tensor([[0, 1]]).float()
