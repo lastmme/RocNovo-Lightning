@@ -68,8 +68,8 @@ def greedy_search(
         lengths[active_idx] += is_fwd_active.float()
         lengths_reverse[active_idx] += is_rev_active.float()
 
-        all_tokens[active_idx, step_idx] = next_token
-        all_tokens_reverse[active_idx, step_idx] = next_token_rev
+        all_tokens[active_idx[is_fwd_active], step_idx] = next_token[is_fwd_active]
+        all_tokens_reverse[active_idx[is_rev_active], step_idx] = next_token_rev[is_rev_active]
 
         finished[active_idx] |= (next_token == SPECIAL_TOKENS[SOS])
         finished_reverse[active_idx] |= (next_token_rev == SPECIAL_TOKENS[SOS])
