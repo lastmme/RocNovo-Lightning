@@ -1,5 +1,5 @@
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -10,10 +10,42 @@ class KVCache:
     
     def past_length(self):
         return self.key.shape[2]
-
-    def update(self, key: torch.Tensor, value: torch.Tensor):
-        self.key = torch.concat([self.key, key], dim=2)
-        self.value = torch.concat([self.value, value], dim=2)
+    
+    def repeat_for_beam(self, beam_size: int):
+        return replace(
+            self,
+            key=self.key.repeat_interleave(
+                beam_size,
+                dim=0
+            ).clone(),
+            value=self.value.repeat_interleave(
+                beam_size,
+                dim=0
+            ).clone()
+        )
+    
+    def filter_by_mask(self, mask: torch.BoolTensor):
+        return replace(
+            self,
+            key=self.key[mask].clone(),
+            value=self.value[mask].clone()
+        )
+    
+    def reorder(self, new_order: torch.Tensor):
+        idx = new_order.to(self.key.device)
+        return replace(
+            self,
+            key=torch.index_select(
+                self.key,
+                0,
+                idx
+            ).clone(),
+            value=torch.index_select(
+                self.value,
+                0,
+                idx
+            ).clone()
+        )
 
 @dataclass(frozen=True)
 class AttentionOutput:
@@ -37,9 +69,42 @@ class Cache:
     def get_ith(self, idx: int):
         return self.kv_cache[idx]
     
-    def update(self, keys: list[torch.Tensor], values: list[torch.Tensor]):
-        for kv_cache, key, value in zip(self.kv_cache, keys, values):
-            kv_cache.update(key, value)
+    def repeat_for_beam(self, beam_size: int):
+        if beam_size <= 0:
+            raise ValueError("beam_size must be > 0")
+        
+        new_kv_cache: list[KVCache] = []
+        for i, kv in enumerate(self.kv_cache):
+            if kv.key.size(0) != kv.value.size(0):
+                raise ValueError(f"kv.key and kv.value batch dim mismatch at layer {i}")
+            
+            new_kv_cache.append(kv.repeat_for_beam(beam_size))
+
+        return replace(
+            self,
+            kv_cache=new_kv_cache
+        )
+    
+    def filter_by_mask(self, mask: torch.BoolTensor):
+        new_kv_cache = [kv.filter_by_mask(mask) for kv in self.kv_cache]
+        return replace(
+            self,
+            kv_cache=new_kv_cache
+        )
+
+    def reorder(self, new_order: torch.Tensor):
+        if new_order.dim() != 1:
+            raise ValueError("new_order must be a 1D LongTensor")
+        
+        new_kv_cache = [
+            kv.reorder(new_order)
+            for kv in self.kv_cache
+        ]
+        
+        return replace(
+            self,
+            kv_cache=new_kv_cache
+        )
 
 @dataclass(frozen=True)
 class OutputConfig:

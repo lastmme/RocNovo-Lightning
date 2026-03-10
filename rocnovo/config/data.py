@@ -1,17 +1,17 @@
-import os
 from dataclasses import dataclass, replace
 
 import torch
+import einops
 
 @dataclass(frozen=True)
 class DataConfig:
-    train_path: str
-    val_path: str
-    test_path: str
-    train_batch_size: int
-    val_batch_size: int
-    test_batch_size: int
-    n_workers: int
+    train_path: str=""
+    val_path: str=""
+    test_path: str=""
+    train_batch_size: int=0
+    val_batch_size: int=0
+    test_batch_size: int=0
+    n_workers: int=0
 
 @dataclass(frozen=True)
 class Precursor:
@@ -24,7 +24,15 @@ class Precursor:
             self,
             mass=self.mass.to(device),
             charge=self.charge.to(device),
-            mz=self.mz.to(device),
+            mz=self.mz.to(device)
+        )
+    
+    def repeat_beamsize(self, S: int):
+        return replace(
+            self,
+            mass=einops.repeat(self.mass, "B -> (B S)", S=S),
+            charge=einops.repeat(self.charge, "B -> (B S)", S=S),
+            mz=einops.repeat(self.mz, "B -> (B S)", S=S),
         )
 
 @dataclass(frozen=True)
@@ -47,6 +55,7 @@ class Spectra:
 class Peptide:
     tokens: torch.LongTensor
     mask: torch.BoolTensor
+
     def to(self, device: torch.device):
         return replace(
             self,
@@ -58,6 +67,7 @@ class Peptide:
 class TrainBatch:
     spectra: Spectra
     peptide: Peptide
+
     def to(self, device: torch.device):
         return replace(
             self,
@@ -80,6 +90,7 @@ class BidirectTrainBatch(TrainBatch):
 @dataclass(frozen=True)
 class InferenceBatch:
     spectra: Spectra
+
     def to(self, device: torch.device):
         return replace(
             self,

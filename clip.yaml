@@ -42,7 +42,7 @@ optimizer:
 scheduler:
   enabled: true
   n_cycles: 1
-  warmup_steps: 14000
+  warmup_steps: 9500
   lr_decay_factor: 1.0
 
 trainer:
@@ -54,9 +54,9 @@ trainer:
   max_epochs: 10
   devices: [0, 1]
   grad_norm_clip: 1.5
-  validation_steps: 50000
+  validation_steps: 40000
   show_progress_bar: true
-  grad_scaler_enable: false
+  grad_scaler_enable: true
   distributed: "ddp"
   gradient_accumulation_steps: 1
   summarywriter_folder: "/data2/xp/RocNovo-Lightning/outputs/tb"
@@ -66,7 +66,7 @@ data:
   train_path: "/data2/xp/data/massive/train_massive.hdf5"
   val_path: "/data2/xp/data/massive/valid_massive.hdf5"
   test_path: "/data2/xp/data/massive/test_massive.hdf5"
-  train_batch_size: 200
-  val_batch_size: 200
+  train_batch_size: 300
+  val_batch_size: 300
   test_batch_size: 256
   n_workers: 16

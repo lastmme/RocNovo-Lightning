@@ -57,7 +57,7 @@ N = 14.003074
 H2O = 2 * H + O
 PROTON = 1.00727646688
 NH3 = 3 * H + N
-
+ISOTOPE = 1.00335
 
 class PTMPeptideTokenizer:
     """A simple class for calculating peptide masses
