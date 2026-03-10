@@ -1,5 +1,5 @@
 from typing import Literal
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, fields
 
 import numpy.typing as npt
 import pandas as pd
@@ -55,7 +55,8 @@ class EvalResult(BaseEvalResult, TheoreticalMz):
 
 class ExportMixin:
     def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame(asdict(self))
+        data = {f.name: getattr(self, f.name) for f in fields(self)}
+        return pd.DataFrame(data)
 
     def to_csv(self, path: str, index: bool=False, **kwargs):
         df = self.to_dataframe()
