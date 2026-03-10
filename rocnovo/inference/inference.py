@@ -150,9 +150,17 @@ def predict(config: str | Path | dict):
         device
     )
     inference_config = InferenceConfig(**config["prediction"])
+    spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
+    peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
+
+    spectrum_tokenizer = SpectrumTokenizer(**asdict(spectrum_tokenizer_config))
+    spectrum_tokenizer.disable_aug()
+    
+    peptide_tokenizer = PTMPeptideTokenizer(**asdict(peptide_tokenizer_config))
     estimated_batch_size = estimate_analytical_batch_size(
         model,
         inference_config.num_beams,
+        peptide_tokenizer.vocab_size,
         inference_config.max_len + 1,
         config["tokenizer"]["spectrum"]["n_top_peaks"],
         inference_config.gradscaling_enabled,
@@ -163,13 +171,6 @@ def predict(config: str | Path | dict):
         data_config,
         test_batch_size=estimated_batch_size
     )
-    spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
-    peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
-
-    spectrum_tokenizer = SpectrumTokenizer(**asdict(spectrum_tokenizer_config))
-    spectrum_tokenizer.disable_aug()
-    
-    peptide_tokenizer = PTMPeptideTokenizer(**asdict(peptide_tokenizer_config))
     if mode == "eval":
         data_module = BiDirectDeNovoDataLoaderModule(
             data_config,

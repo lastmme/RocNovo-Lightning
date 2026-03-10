@@ -75,25 +75,21 @@ def _prepare_token_metadata(
 def resolve_bidirectional_predictions(merged_batch: DenovoResult | EvalResult):
     fwd_scores = merged_batch.fwd_score
     rev_scores = merged_batch.rev_score
-    fwd_peps = merged_batch.fwd_peptide
-    rev_peps = merged_batch.rev_peptide
+    
+    fwd_peps = np.array(merged_batch.fwd_peptide, dtype=object)
+    rev_peps = np.array(merged_batch.rev_peptide, dtype=object)
+
+    fwd_peps = np.where(fwd_scores == -2.0, "", fwd_peps)
+    rev_peps = np.where(rev_scores == -2.0, "", rev_peps)
 
     fwd_wins = fwd_scores >= rev_scores
-    pred_scores = np.where(fwd_wins, fwd_scores, rev_scores)
+    fwd_wins = np.where((fwd_peps == "") & (rev_peps != ""), False, fwd_wins)
+    fwd_wins = np.where((rev_peps == "") & (fwd_peps != ""), True, fwd_wins)
+
     pred_mzs = np.where(fwd_wins, merged_batch.fwd_mz, merged_batch.rev_mz)
-    pred_peptides = []
-    directions = []
-    
-    for i in range(len(fwd_scores)):
-        if fwd_wins[i]:
-            pep = "" if fwd_scores[i] == -2.0 else fwd_peps[i]
-            d = "fwd"
-        else:
-            pep = "" if rev_scores[i] == -2.0 else rev_peps[i]
-            d = "rev"
-        
-        pred_peptides.append(pep)
-        directions.append(d)
+    pred_peptides = np.where(fwd_wins, fwd_peps, rev_peps).tolist()
+    pred_scores = np.where(fwd_wins, fwd_scores, rev_scores)
+    directions = np.where(fwd_wins, "fwd", "rev").tolist()
     
     return ResolvedPrediction(
         pred_mzs,
@@ -193,6 +189,7 @@ def parse_device(device_input: int | str):
 def estimate_analytical_batch_size(
     model: Denovo,
     num_beams: int,
+    vocab_size: int,
     max_length: int,
     num_peaks: int=300,
     gradscaler_enabled: bool=True,
@@ -226,7 +223,29 @@ def estimate_analytical_batch_size(
     single_encoder_peak = attn_matrix_bytes + ffn_bytes
     activation_peak = single_encoder_peak * 1.5
 
-    total_bytes_per_batch = persistent_memory + activation_peak
+    bidirectional_beam_buffer = 0
+    if num_beams >= 1:
+        S = actual_beam_size
+        L = max_length + 2
+        V = vocab_size
+
+        bytes_cur_tokens = S * L * 8             # [B, S, L] int64
+        bytes_cur_scores = S * L * V * 4         # [B, S, L, V] float32
+        bytes_cur_cumsum = S * 4                 # [B, S] float32
+
+        bytes_his_tokens = S * L * L * 8         # [B, S, L, L] int64
+        bytes_his_scores = S * L * 4             # [B, S, L] float32
+
+        bytes_flags = S * 4 * 1                  # 4 * [B * S] bool
+
+        single_dir_buffer_bytes = (
+            bytes_cur_tokens + bytes_cur_scores + bytes_cur_cumsum + 
+            bytes_his_tokens + bytes_his_scores + bytes_flags
+        )
+        
+        bidirectional_beam_buffer = single_dir_buffer_bytes * 2
+
+    total_bytes_per_batch = persistent_memory + activation_peak + bidirectional_beam_buffer
     memory_per_batch_with_margin = total_bytes_per_batch * 1.15
     max_batch_size = int(target_vram // memory_per_batch_with_margin)
     return max(1, max_batch_size)
