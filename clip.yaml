@@ -4,6 +4,7 @@ aug:
   removal_rate: 0.2
   removal_intensity_threshold: 0.3
   perturbation_rate: 0.15
+  return_dummy_tensor: false
 
 tokenizer:
   spectrum:
@@ -34,6 +35,7 @@ model:
     dim_feedforward: 1024
   
   logits_scale: 0.05
+  learnable_logits_scale: true
 
 optimizer:
   lr: 1.0e-4

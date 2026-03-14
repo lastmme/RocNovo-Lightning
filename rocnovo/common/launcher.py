@@ -15,6 +15,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 import rocnovo.config.train as train_configs
+from rocnovo.common.logger import logger
 from rocnovo.data.dataloaders import BaseDataModule
 from rocnovo.common.scheduler import get_restart_cosine_decay_scheduler_with_warmup
 
@@ -102,7 +103,9 @@ class BaseModule(ABC, LightningModule):
                 pbar.set_description(description)
 
 def create_tb_checkpoint_dir(trainer_config: train_configs.TrainerConfig):
+    logger.debug(f"Create tensorboard folder: {trainer_config.summarywriter_folder}")
     Path(trainer_config.summarywriter_folder).mkdir(parents=True, exist_ok=True)
+    logger.debug(f"Create model save folder: {trainer_config.model_save_folder}")
     Path(trainer_config.model_save_folder).mkdir(parents=True, exist_ok=True)
 
 def get_unique_log_dir(base: str) -> str:
@@ -119,6 +122,7 @@ def build_trainer(
     trainer_config: train_configs.TrainerConfig,
     mode: Literal["train", "test"]="train"
 ):
+    logger.debug(f"Build trainer with config: {trainer_config}")
     checkpoint_callback = ModelCheckpoint(
         dirpath=trainer_config.model_save_folder,
         filename=f"checkpoints_{{step}}_{{val_{trainer_config.evaluate_metric_name}:.4f}}",

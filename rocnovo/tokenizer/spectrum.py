@@ -90,8 +90,11 @@ class SpectrumTokenizer:
             mz, intensities = spectrum.mz, spectrum.intensity
             if self.aug_config is not None and self.aug_config.enabled and np.random.random() < self.aug_config.prob:
                 mz, intensities = self.aug(mz, intensities)
-
-            return torch.tensor(np.array([mz, intensities])).T.float()
+            
+            if self.aug_config is not None and self.aug_config.return_dummy_tensor:
+                return torch.tensor(np.array([spectrum.mz, intensities])).T.float()
+            else:
+                return torch.tensor(np.array([mz, intensities])).T.float()
         
         except ValueError:
             return torch.tensor([[0, 1]]).float()

@@ -12,6 +12,7 @@ from rocnovo.config.train import Config, TrainerConfig
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, SPECIAL_TOKENS, PAD
 from rocnovo.common.io import normalize_path
+from rocnovo.common.logger import logger
 from rocnovo.common.launcher import pipeline, BaseModule
 from rocnovo.components.encoders import RoPESpectrumEncoder
 from rocnovo.components.decoders import BiDirectRopeDecoder
@@ -149,12 +150,14 @@ class Denovo(BaseModule):
         return loss
 
 def train(config_path: str):
+    logger.debug(f"Start to train denovo model with config: {config_path}")
     config_path = normalize_path(config_path)
     config = Config(config_path)
     trainer_config = TrainerConfig(**config["trainer"])
     checkpoint_path = trainer_config.checkpoint_path
     mode = trainer_config.mode
     if checkpoint_path is not None:
+        logger.debug(f"Load checkpoint from: {trainer_config.checkpoint_path}, mode: {trainer_config.mode}")
         module = Denovo.load_from_checkpoint(
             trainer_config.checkpoint_path,
             map_location="cpu"
@@ -166,6 +169,7 @@ def train(config_path: str):
             trainer_config.mode = mode
     else:
         module = Denovo(config.dict())
+        logger.debug(f"Start to train denovo model from scratch with config: {config}")
     
     spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
     peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])

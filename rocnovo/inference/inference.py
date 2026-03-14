@@ -1,5 +1,6 @@
+import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 from dataclasses import asdict, replace
 
 import torch
@@ -7,6 +8,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from rocnovo.common.io import load_yaml, normalize_path
+from rocnovo.common.logger import logger
 from rocnovo.config.model import OutputConfig
 import rocnovo.config.tokenizer as tokenizer_config
 from rocnovo.config.data import DataConfig, BidirectTrainBatch, InferenceBatch
@@ -22,6 +24,7 @@ from rocnovo.inference.utils import (
     estimate_analytical_batch_size
 )
 from rocnovo.module.denovo import Denovo
+from rocnovo.common.logger import logger
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, SOS, PAD, SPECIAL_TOKENS
 from rocnovo.data.dataloaders import BiDirectDeNovoDataLoaderModule, SpectraDataLoaderModule
@@ -142,7 +145,8 @@ def predict(config: str | Path | dict):
     mode = config["mode"]
     if mode != "denovo" and mode != "eval":
         raise ValueError(f"mode must be either 'denovo' or 'eval', but got {mode}")
-    
+
+    logger.debug(f"Start to predict {config['task_name']} with mode: {mode}")
     device = parse_device(config["device"])
     model, config = load_denovo_from_checkpoint(
         config["checkpoint_path"],
@@ -166,6 +170,9 @@ def predict(config: str | Path | dict):
         inference_config.gradscaling_enabled,
         device
     )
+    logger.debug(f"num_beams >= 1 means number of beams in beam search, 0 means greedy search")
+    logger.debug(f"Estimated prediction batch size: {estimated_batch_size} with num_beams: {inference_config.num_beams}")
+
     data_config = DataConfig(**config["data"])
     data_config = replace(
         data_config,
@@ -183,6 +190,10 @@ def predict(config: str | Path | dict):
             spectrum_tokenizer
         )
     
+    info = f"greedy search" if inference_config.num_beams == 0 else f"beam search beam size: {inference_config.num_beams}" 
+    logger.info(f"Start to predict {config['task_name']} {info}")
+    
+    start = time.time()
     result = generation(
         model,
         mode,
@@ -192,6 +203,8 @@ def predict(config: str | Path | dict):
         parse_device(config["device"]),
         config["task_name"]
     )
+    end = time.time()
+    logger.info(f"Task End! It consumes {end - start:.3f} seconds")
     if not result:
         print("No result found")
         return

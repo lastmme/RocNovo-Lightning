@@ -12,7 +12,7 @@ from rocnovo.common.launcher import pipeline
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer
 from rocnovo.common.io import normalize_path
-from rocnovo.common.logger import logger, set_logger_dir
+from rocnovo.common.logger import logger
 from rocnovo.common.launcher import BaseModule
 from rocnovo.config.train import Config, TrainerConfig
 from rocnovo.config.aug import AugmentationConfig
@@ -35,9 +35,12 @@ class Clip(BaseModule):
             self.model_config["spectrum"]["hidden_size"],
             1
         )
-        self.logits_scale = nn.Parameter(
-            torch.ones([]) * np.log(1 / self.model_config["logits_scale"])
-        )
+        if self.model_config["learnable_logits_scale"]:
+            self.logits_scale = nn.Parameter(
+                torch.ones([]) * np.log(1 / self.model_config["logits_scale"])
+            )
+        else:
+            self.logits_scale = torch.ones([]) * np.log(1 / self.model_config["logits_scale"])
 
     def encode_spectrum(self, spectra: data_config.Spectra):
         pkt, mask = self.spectrum_encoder(spectra)  # (B, L + 1, D)
@@ -71,6 +74,7 @@ class Clip(BaseModule):
         for param in self.parameters():
             param.requires_grad = True
     
+    @torch.amp.autocast("cuda", enabled=False)
     def anchor_dot_contrast(
         self,
         a: torch.Tensor,
@@ -79,6 +83,8 @@ class Clip(BaseModule):
     ):
         batch_size = a.shape[0]
         device = a.device
+        a = a.float()
+        b = b.float()
         a = F.normalize(a, p=2, dim=-1)
         b = F.normalize(b, p=2, dim=-1)
         logits = torch.matmul(a, b.T) * logits_exp
@@ -132,11 +138,15 @@ class Clip(BaseModule):
 
 def train(config_path: str):
     config_path = normalize_path(config_path)
+
+    logger.debug(f"Start to train clip model with config: {config_path}")
+
     config = Config(config_path)
     trainer_config = TrainerConfig(**config["trainer"])
     checkpoint_path = trainer_config.checkpoint_path
     mode = trainer_config.mode
     if checkpoint_path is not None:
+        logger.debug(f"Resuming training from checkpoint: {trainer_config.checkpoint_path}, mode: {trainer_config.mode}")
         module = Clip.load_from_checkpoint(
             trainer_config.checkpoint_path,
             map_location="cpu"
@@ -148,8 +158,8 @@ def train(config_path: str):
             trainer_config.mode = mode
     else:
         module = Clip(config.dict())
+        logger.debug(f"Start to train clip model from scratch with config")
     
-    data_config.DataConfig(**config["data"])
     aug_config = AugmentationConfig(**config["aug"])
     spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
     peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
@@ -158,6 +168,7 @@ def train(config_path: str):
     if aug_config.enabled:
         spectrum_tokenizer.set_aug_config(aug_config)
     
+    logger.debug(f"Train with augmentation: {aug_config.enabled}")
     peptide_tokenizer = PTMPeptideTokenizer(**asdict(peptide_tokenizer_config))
     data_module = DeNovoDataLoaderModule(
         data_config.DataConfig(**config["data"]),
