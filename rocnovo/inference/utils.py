@@ -204,19 +204,24 @@ def estimate_analytical_batch_size(
     
     static_overhead = 1.5 * (1024**3)
     usable_vram = max(0, free_vram - static_overhead)
-    target_vram = usable_vram * 0.95 
+    target_vram = usable_vram * 0.95
     
     encoder_hidden_size = model.model_config["spectrum"]["hidden_size"]
     encoder_ffn_dim = model.model_config["spectrum"]["dim_feedforward"]
     encoder_heads = model.model_config["spectrum"]["n_head"]
     
     decoder_hidden_size = model.model_config["peptide"]["hidden_size"]
+    decoder_ffn_dim = model.model_config["peptide"]["dim_feedforward"]
     decoder_num_layers = len(model.peptide_decoder.decoder.layers)
     
     mem_states_bytes = actual_beam_size * num_peaks * (encoder_hidden_size * n_byte)
     kvcache_bytes = 2 * actual_beam_size * decoder_num_layers * 2 * max_length * (decoder_hidden_size * n_byte)
+    decoder_activation_peak = actual_beam_size * decoder_ffn_dim * n_byte
+
+    if num_beams >= 1:
+        kvcache_bytes *= 2
     
-    persistent_memory = mem_states_bytes + kvcache_bytes
+    persistent_memory = mem_states_bytes + kvcache_bytes + decoder_activation_peak
     attn_matrix_bytes = encoder_heads * ((num_peaks + 1) ** 2) * 4
     ffn_bytes = (num_peaks + 1) * encoder_ffn_dim * n_byte
     
@@ -248,6 +253,7 @@ def estimate_analytical_batch_size(
     total_bytes_per_batch = persistent_memory + activation_peak + bidirectional_beam_buffer
     memory_per_batch_with_margin = total_bytes_per_batch * 1.15
     max_batch_size = int(target_vram // memory_per_batch_with_margin)
+    max_batch_size = (max_batch_size // 8) * 8
     return max(1, max_batch_size)
 
 def load_denovo_from_checkpoint(
