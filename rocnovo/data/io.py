@@ -2,7 +2,7 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 
 import numpy as np
-from tqdm.auto import tqdm
+from tqdm import tqdm
 from pyteomics.mzml import MzML
 from pyteomics.mzxml import MzXML
 from pyteomics.mgf import MGF
