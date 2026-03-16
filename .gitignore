@@ -1,7 +1,7 @@
 **/__pycache__/
 /data/
-*.ipynb
 logs/*
 outputs/*
 .dockerignore
 .devcontainer/
+test*.ipynb
