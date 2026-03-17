@@ -34,22 +34,6 @@ class BaseModule(ABC, LightningModule):
     @abstractmethod
     def init_model(self):
         pass
-
-    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure, **kwargs):
-        self.should_skip_lr_scheduler_step = False
-        scaler = getattr(self.trainer.strategy.precision_plugin, "scaler", None)
-        if scaler:
-            scale_before_step = scaler.get_scale()
-        optimizer.step(closure=optimizer_closure)
-        if scaler:
-            scale_after_step = scaler.get_scale()
-            self.should_skip_lr_scheduler_step = scale_before_step > scale_after_step
-
-    def lr_scheduler_step(self, scheduler, metric):
-        if self.should_skip_lr_scheduler_step:
-            return
-
-        scheduler.step()
     
     def configure_optimizers(self):
         optimizer = AdamW(
@@ -60,9 +44,16 @@ class BaseModule(ABC, LightningModule):
         if self.scheduler_config.enabled:
             total_steps = self.trainer.estimated_stepping_batches
             print(f"total_steps = {total_steps}")
+
+            warmsteps = self.scheduler_config.warmup_steps
+            if isinstance(warmsteps, float) and warmsteps < 1.0:
+                warmsteps = int(warmsteps * total_steps)
+            else:
+                warmsteps = int(warmsteps)
+
             scheduler = get_restart_cosine_decay_scheduler_with_warmup(
                 optimizer,
-                self.scheduler_config.warmup_steps,
+                warmsteps,
                 total_steps,
                 self.scheduler_config.n_cycles,
                 self.scheduler_config.lr_decay_factor
