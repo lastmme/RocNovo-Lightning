@@ -5,3 +5,4 @@ outputs/*
 .dockerignore
 .devcontainer/
 test*.ipynb
+.vscode
