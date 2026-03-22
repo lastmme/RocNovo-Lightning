@@ -1,0 +1,19 @@
+mode: "eval"
+device: "cuda:0"
+task_name: "nine_species"
+output_dir: "/data2/xp/RocNovo-Lightning/outputs/final/novobench_results"
+checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_denovo/checkpoints_step=220512_val_total_accuracy=0.5684.ckpt"
+clip_checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_clip/checkpoints_step=39461_val_top1_accuracy=0.8703.ckpt"
+
+prediction:
+  num_beams: 10
+  min_len: 6
+  max_len: 100
+  max_isotope: 1
+  mass_tolerance: 50.0
+  gradscaling_enabled: true
+
+data:
+  test_path: "/data2/xp/data/novobench/test_hdf5/nine_species.hdf5"
+  test_batch_size: 512
+  n_workers: 16
