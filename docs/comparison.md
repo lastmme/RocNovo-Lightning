@@ -20,17 +20,20 @@ While the foundational structure remains the same, our implementation introduces
 
 **1. Original Implementation (Custom)**
 The original code introduced a non-linear LeakyReLU activation to the dot product before temperature ($\tau$) scaling:
+
 $$
     S_{i,j} = \frac{\text{LeakyReLU}(u_i \cdot v_j)}{\tau}
 $$
 
 **2. Current Implementation (Standard CLIP)**
 We removed the LeakyReLU activation, directly scaling the raw cosine similarity by the learnable temperature parameter:
+
 $$
     S_{i,j} = \frac{u_i \cdot v_j}{\tau}
 $$
 
 Both implementations ultimately optimize the symmetric cross-entropy loss over these logits:
+
 $$
     \mathcal{L} = -\frac{1}{2N} \sum_{i=1}^{N} \left( \log \frac{\exp(S_{i,i})}{\sum_{j=1}^{N} \exp(S_{i,j})} + \log \frac{\exp(S_{i,i})}{\sum_{k=1}^{N} \exp(S_{k,i})} \right)
 $$
