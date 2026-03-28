@@ -1,7 +1,7 @@
 aug:
   enabled: false
 
-clip_checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/clip/checkpoints_step=467635_val_top1_accuracy=0.9696.ckpt"
+clip_checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/clip_dummy/checkpoints_step=467635_val_top1_accuracy=0.9722.ckpt"
 
 tokenizer:
   spectrum:
