@@ -37,6 +37,73 @@ In mass spectrometry *de novo* sequencing, standard evaluation metrics include A
 
 However, cases exist where the masses are similar but the actual residues differ, such as `D` vs. `N+0.984` and `E` vs. `Q+0.984`. Therefore, we introduced strict character-level metrics alongside the traditional mass-based ones. A prediction is only considered fully successful if the predicted sequence exactly matches the ground truth at the character level.
 
+Here, we only present the results with a beam size of 10. For more comprehensive results, please refer to [06_metric_calculation.ipynb](../tutorials/06_metric_calculation.ipynb).
+
+### Nine Species V1
+
+#### Realistic Data Augmentation
+
+| Species      | AA Precision | AA Recall | Peptide Recall | Full Accuracy |
+| :----------- | :----------: | :-------: | :------------: | :-----------: |
+| Bacillus     |    0.867     |   0.866   |     0.715      |     0.688     |
+| Clambacteria |    0.740     |   0.733   |     0.522      |     0.503     |
+| Honeybee     |    0.810     |   0.810   |     0.617      |     0.609     |
+| Human        |    0.815     |   0.814   |     0.657      |     0.653     |
+| Mmazei       |    0.827     |   0.827   |     0.647      |     0.620     |
+| Mouse        |    0.847     |   0.843   |     0.639      |     0.627     |
+| Ricebean     |    0.864     |   0.851   |     0.715      |     0.694     |
+| Tomato       |    0.836     |   0.831   |     0.687      |     0.667     |
+| Yeast        |    0.814     |   0.809   |     0.677      |     0.663     |
+| **Mean**     |  **0.824**   | **0.820** |   **0.653**    |   **0.636**   |
+
+
+#### Dummy Data Augmentation
+
+| Species      | AA Precision | AA Recall | Peptide Recall | Full Accuracy |
+| :----------- | :----------: | :-------: | :------------: | :-----------: |
+| Bacillus     |    0.870     |   0.869   |     0.716      |     0.689     |
+| Clambacteria |    0.740     |   0.734   |     0.519      |     0.500     |
+| Honeybee     |    0.813     |   0.813   |     0.619      |     0.609     |
+| Human        |    0.817     |   0.815   |     0.659      |     0.654     |
+| Mmazei       |    0.828     |   0.828   |     0.650      |     0.623     |
+| Mouse        |    0.846     |   0.842   |     0.635      |     0.624     |
+| Ricebean     |    0.861     |   0.850   |     0.712      |     0.690     |
+| Tomato       |    0.836     |   0.831   |     0.686      |     0.667     |
+| Yeast        |    0.818     |   0.814   |     0.682      |     0.668     |
+| **Mean**     |  **0.825**   | **0.822** |   **0.653**    |   **0.636**   |
+
+### Nine Species V2
+
+#### Realistic Data Augmentation
+
+| Species      | AA Precision | AA Recall | Peptide Recall | Full Accuracy |
+| :----------- | :----------: | :-------: | :------------: | :-----------: |
+| Bacillus     |    0.940     |   0.938   |     0.857      |     0.829     |
+| Clambacteria |    0.849     |   0.846   |     0.630      |     0.609     |
+| Honeybee     |    0.905     |   0.904   |     0.773      |     0.763     |
+| Human        |    0.953     |   0.953   |     0.872      |     0.868     |
+| Mmazei       |    0.938     |   0.937   |     0.835      |     0.796     |
+| Mouse        |    0.899     |   0.896   |     0.707      |     0.699     |
+| Ricebean     |    0.948     |   0.947   |     0.858      |     0.824     |
+| Tomato       |    0.930     |   0.928   |     0.827      |     0.805     |
+| Yeast        |    0.950     |   0.950   |     0.886      |     0.869     |
+| **Mean**     |  **0.924**   | **0.922** |   **0.805**    |   **0.785**   |
+
+#### Dummy Data Augmentation
+
+| Species      | AA Precision | AA Recall | Peptide Recall | Full Accuracy |
+| :----------- | :----------: | :-------: | :------------: | :-----------: |
+| Bacillus     |    0.939     |   0.938   |     0.856      |     0.828     |
+| Clambacteria |    0.849     |   0.845   |     0.630      |     0.606     |
+| Honeybee     |    0.907     |   0.906   |     0.775      |     0.763     |
+| Human        |    0.953     |   0.952   |     0.872      |     0.868     |
+| Mmazei       |    0.938     |   0.937   |     0.835      |     0.798     |
+| Mouse        |    0.897     |   0.894   |     0.703      |     0.695     |
+| Ricebean     |    0.948     |   0.947   |     0.858      |     0.823     |
+| Tomato       |    0.930     |   0.928   |     0.827      |     0.804     |
+| Yeast        |    0.951     |   0.951   |     0.888      |     0.875     |
+| **Mean**     |  **0.924**   | **0.922** |   **0.805**    |   **0.784**   |
+
 ### NovoBench
 
 This dataset consists of three subsets: HC PT, Nine Species, and Seven Species. Each subset is already pre-split into training, validation, and test sets. We have additionally included PTM Precision, PTM Recall, and a peptide-level AUC metric for comprehensive evaluation.
