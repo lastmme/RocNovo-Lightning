@@ -6,3 +6,5 @@ outputs/*
 .devcontainer/
 test*.ipynb
 .vscode
+build/
+*.egg-info/
