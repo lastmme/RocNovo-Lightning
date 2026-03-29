@@ -56,7 +56,7 @@ trainer:
   grad_norm_clip: 1.5
   validation_steps: 1000
   show_progress_bar: true
-  grad_scaler_enable: false
+  grad_scaler_enable: true
   distributed: "ddp"
   gradient_accumulation_steps: 1
   summarywriter_folder: "/data2/xp/RocNovo-Lightning/outputs/tb"
