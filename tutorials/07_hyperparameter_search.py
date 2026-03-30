@@ -58,7 +58,7 @@ def objective(trial: Trial, config_path: Path, base_save_dir: Path):
         [
             "python", "main.py", "train",
             "--stage", "denovo",
-            "--config", f"{str(trial_save_dir.joinpath("denovo.yaml"))}",
+            "--config", f"{str(trial_save_dir.joinpath('denovo.yaml'))}",
             "--log_dir", f"{str(base_save_dir)}"
         ],
         check=True
