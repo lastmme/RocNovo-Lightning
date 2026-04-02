@@ -1,0 +1,72 @@
+aug:
+  enabled: false
+
+clip_checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_CV/mouse_clip/checkpoints_step=69632_val_top1_accuracy=0.9875.ckpt"
+
+tokenizer:
+  spectrum:
+    n_top_peaks: 150
+    min_mz: 50.0
+    max_mz: 2500.0
+    min_intensity: 0.01
+    remove_precursor_tol: 2.0
+
+  peptide:
+    reverse: true
+    residues: "massivekb"
+
+model:
+  spectrum:
+    hidden_size: 512
+    n_head: 8
+    n_layers: 9
+    dropout: 0.18
+    dim_feedforward: 1024
+    activation: "gelu"
+  peptide:
+    n_vocab: 29
+    hidden_size: 512
+    n_head: 8
+    n_layers: 9
+    dropout: 0.18
+    dim_feedforward: 1024
+    activation: "gelu"
+
+loss:
+  label_smoothing: 0.05
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  enabled: true
+  n_cycles: 1
+  warmup_steps: 0.05
+  lr_decay_factor: 10.0
+
+trainer:
+  is_max: true
+  evaluate_metric_name: "total_accuracy"
+  task_name: "mouse_denovo"
+  random_seed: 1256
+  save_top_k: 3
+  max_epochs: 30
+  devices: [0, 1]
+  grad_norm_clip: 1.5
+  validation_steps: 5000
+  show_progress_bar: true
+  grad_scaler_enable: true
+  distributed: "ddp"
+  gradient_accumulation_steps: 1
+  summarywriter_folder: "/data2/xp/RocNovo-Lightning/outputs/tb/nine_species_CV"
+  model_save_folder: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_CV/mouse_denovo"
+
+data:
+  train_path: "/data2/xp/data/v1/mouse/train_set_mouse.hdf5"
+  val_path: "/data2/xp/data/v1/mouse/validation_set_mouse.hdf5"
+  test_path: "/data2/xp/data/v1/mouse/test_set_mouse.hdf5"
+  train_batch_size: 32
+  val_batch_size: 256
+  test_batch_size: 256
+  n_workers: 16

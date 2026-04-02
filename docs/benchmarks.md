@@ -104,6 +104,23 @@ Here, we only present the results with a beam size of 10. For more comprehensive
 | Yeast        |    0.951     |   0.951   |     0.888      |     0.875     |
 | **Mean**     |  **0.924**   | **0.922** |   **0.805**    |   **0.784**   |
 
+### Nine Species CV
+
+#### Small Range
+
+| species      | AA Precision | AA Recall    | Peptide Recall | Full Accuracy |
+| :----------- | :----------- | :----------- | :------------- | :------------ |
+| bacillus     | 0.847700     | 0.847496     | 0.680776       | 0.656299      |
+| clambacteria | 0.687136     | 0.684363     | 0.472057       | 0.454827      |
+| honeybee     | 0.756459     | 0.758343     | 0.554997       | 0.549030      |
+| human        | 0.671279     | 0.675525     | 0.463988       | 0.452027      |
+| mmazei       | 0.804227     | 0.804831     | 0.615487       | 0.593373      |
+| mouse        | 0.796726     | 0.794701     | 0.550363       | 0.535048      |
+| ricebean     | 0.845133     | 0.843411     | 0.717485       | 0.701443      |
+| tomato       | 0.802746     | 0.801924     | 0.642986       | 0.625209      |
+| yeast        | 0.794270     | 0.795623     | 0.650253       | 0.638287      |
+| **Mean**     | **0.778409** | **0.778469** | **0.594266**   | **0.578394**  |
+
 ### NovoBench
 
 This dataset consists of three subsets: HC PT, Nine Species, and Seven Species. Each subset is already pre-split into training, validation, and test sets. We have additionally included PTM Precision, PTM Recall, and a peptide-level AUC metric for comprehensive evaluation.

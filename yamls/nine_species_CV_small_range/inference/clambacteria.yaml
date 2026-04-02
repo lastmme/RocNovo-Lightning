@@ -1,0 +1,19 @@
+mode: "eval"
+device: "cuda:0"
+task_name: "clambacteria"
+output_dir: "/data2/xp/RocNovo-Lightning/outputs/final/results"
+checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_CV/clambacteria_denovo/checkpoints_step=576788_val_total_accuracy=0.8137.ckpt"
+clip_checkpoint_path: "/data2/xp/RocNovo-Lightning/outputs/checkpoints/nine_species_CV/clambacteria_clip/checkpoints_step=64388_val_top1_accuracy=0.9870.ckpt"
+
+prediction:
+  num_beams: 10
+  min_len: 6
+  max_len: 100
+  max_isotope: 1
+  mass_tolerance: 50.0
+  gradscaling_enabled: true
+
+data:
+  test_path: "/data2/xp/data/v1/clambacteria/test_set_clambacteria.hdf5"
+  test_batch_size: 512
+  n_workers: 16
