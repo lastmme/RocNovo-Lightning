@@ -88,6 +88,7 @@ class BaseDataModule(LightningDataModule):
             num_workers=self.data_config.n_workers,
             shuffle=True,
             pin_memory=True,
+            persistent_workers=True
         )
 
     def val_dataloader(self):
@@ -98,6 +99,7 @@ class BaseDataModule(LightningDataModule):
             num_workers=self.data_config.n_workers,
             shuffle=True,
             pin_memory=True,
+            persistent_workers=True
         )
 
     def test_dataloader(self):
