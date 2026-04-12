@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Literal
 from dataclasses import asdict, replace
 
+import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -154,6 +155,8 @@ def predict(config: str | Path | dict):
         device
     )
     inference_config = InferenceConfig(**config["prediction"])
+    logger.debug(f"spectrum tokenizer config: {config['tokenizer']['spectrum']}")
+    logger.debug(f"peptide tokenizer config: {config['tokenizer']['peptide']}")
     spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
     peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
 
@@ -192,7 +195,7 @@ def predict(config: str | Path | dict):
     
     info = f"greedy search" if inference_config.num_beams == 0 else f"beam search beam size: {inference_config.num_beams}" 
     logger.info(f"Start to predict {config['task_name']} {info}")
-    
+    pl.seed_everything(0)
     start = time.time()
     result = generation(
         model,

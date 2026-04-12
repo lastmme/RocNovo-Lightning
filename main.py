@@ -6,7 +6,7 @@ from functools import wraps
 import click
 
 from rocnovo.common.io import normalize_path
-from rocnovo.common.logger import set_logger_dir
+from rocnovo.common.logger import set_logger_dir, redirect_lightning_logs_to_loguru
 from rocnovo.module.clip import train as clip_train
 from rocnovo.module.denovo import train as denovo_train
 from rocnovo.inference.inference import predict
@@ -34,6 +34,7 @@ def with_shared_params(func):
         config = normalize_path(config)
         log_dir = normalize_path(log_dir)
         set_logger_dir(log_dir)
+        redirect_lightning_logs_to_loguru()
         params = SharedParams(config=config, log_dir=log_dir)
         return func(params, *args, **kwargs)
     
