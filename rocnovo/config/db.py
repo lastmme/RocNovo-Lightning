@@ -1,4 +1,4 @@
-from typing import Literal, Optional, get_args
+from typing import Literal, get_args
 from dataclasses import dataclass, field
 
 from pyteomics.parser import expasy_rules
@@ -46,9 +46,9 @@ class Peptide:
 
 @dataclass(frozen=True)
 class BucketConfig:
-    bin_size: int=100000
-    min_mass: float=0.0
-    max_mass: float=6000.0
+    bin_size: int=100_000
+    min_mass: float=400.0
+    max_mass: float=6_000.0
 
     def __post_init__(self):
         if self.min_mass > self.max_mass:

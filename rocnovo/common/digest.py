@@ -5,6 +5,7 @@ import string
 import shutil
 import heapq
 from pathlib import Path
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Literal, Generator, Optional
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -58,7 +59,7 @@ class Buffer:
         self.protein_ids.clear()
         self.is_decoys.clear()
 
-    def to_table(self, schema: pa.Schema) -> pa.Table:
+    def to_table(self, schema: pa.Schema):
         return pa.Table.from_arrays(
             [
                 self.ids, self.bucket_ids, self.masses, 
@@ -199,6 +200,40 @@ def decoy(fasta_path: Path, output_dir: Path, decoy_prefix: str="DECOY_", mode: 
     
     return db_file
 
+def aggregate_and_resolve_collisions(peptides_generator: Generator[tuple[Peptide, int], Any, None], progress_bar: bool=True):
+    # we may use the stream to aggregate the peptides to avoid memory issues.
+    logger.info("Aggregating shared peptides and resolving Target-Decoy collisions ...")
+    peptide_map: dict[str, dict[Literal["target", "decoy"], set[str]]] = defaultdict(lambda: defaultdict(set))
+    total_skipped = 0
+
+    for pep, skipped in tqdm(peptides_generator, desc="Aggregating peptides", dynamic_ncols=True, disable=not progress_bar):
+        total_skipped += skipped
+
+        if pep.is_decoy:
+            peptide_map[pep.peptide]["decoy"].add(pep.protein_id)
+        else:
+            peptide_map[pep.peptide]["target"].add(pep.protein_id)
+
+    logger.info(f"Aggregation complete. Found {len(peptide_map)} unique base sequences. Starting PTM expansion ...")
+    
+    first_yield = True
+    for seq, type_map in peptide_map.items():
+        # Pass the accumulated skipped count only on the first yield so the downstream pbar is accurate
+        skipped_to_yield = total_skipped if first_yield else 0
+        first_yield = False
+        
+        targets = type_map["target"]
+        decoys = type_map["decoy"]
+        
+        if targets:
+            # TARGET WINS: If targets exist, we completely ignore any decoys for this sequence
+            prot_str = ";".join(sorted(targets))
+            yield Peptide(prot_str, seq, False), skipped_to_yield
+        elif decoys:
+            # PURE DECOY: Only exists in the decoy database
+            prot_str = ";".join(sorted(decoys))
+            yield Peptide(prot_str, seq, True), skipped_to_yield
+
 def process_peptide_batch(
     batch_data: list[Peptide],
     temp_chunk_path: Path,
@@ -208,7 +243,7 @@ def process_peptide_batch(
     var_mods: dict[str, Any],
     swap_map: dict[str, str],
     bucket_config: BucketConfig
-) -> int:
+):
     swap_regex = re.compile("(%s)" % "|".join(map(re.escape, swap_map.keys()))) if swap_map else None
     
     local_buffer = []
@@ -256,9 +291,9 @@ def write_digested_peptides(
     bucket_config: BucketConfig,
     progress_bar: bool=True,
     num_workers: Optional[int]=None,
-    worker_batch_size: int=10_000,
+    worker_batch_size: int=5_000,
     sort_buffer_size: int=10_000
-) -> Path:
+):
     output_dir.mkdir(parents=True, exist_ok=True)
     final_output_file = output_dir.joinpath("peptides.parquet")
     writing_output_file = output_dir.joinpath("writing_peptides.parquet")
@@ -318,7 +353,7 @@ def write_digested_peptides(
                     bucket_config
                 ))
         
-        for i, future in enumerate(as_completed(futures)):
+        for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Waiting for tasks", disable=not progress_bar, dynamic_ncols=True)):
             rows = future.result()
             if rows > 0:
                 total_rows += rows
@@ -343,6 +378,13 @@ def write_digested_peptides(
         ("protein_id", pa.string()),
         ("is_decoy", pa.bool_())
     ])
+    custom_metadata = {
+        b"rocnovo_min_mass": str(bucket_config.min_mass).encode('utf-8'),
+        b"rocnovo_max_mass": str(bucket_config.max_mass).encode('utf-8'),
+        b"rocnovo_bin_size": str(bucket_config.bin_size).encode('utf-8'),
+        b"rocnovo_db_version": b"1.0.0"
+    }
+    schema_with_meta = final_schema.with_metadata(custom_metadata)
     
     min_heap = []
     iterators = [pq.ParquetFile(f).iter_batches(sort_buffer_size) for f in chunk_files]
@@ -378,7 +420,7 @@ def write_digested_peptides(
     end = time.time()
     logger.debug(f"Initializing heap in {end - start:.2f} seconds.")
 
-    def refill_batch_sync(idx: int) -> bool:
+    def refill_batch_sync(idx: int):
         try:
             batch_arrow = next(iterators[idx])
             batches[idx] = ExternalSortBatchData(
@@ -401,7 +443,7 @@ def write_digested_peptides(
     buffer = Buffer()
     bucket_bin_width = (bucket_config.max_mass - bucket_config.min_mass) / bucket_config.bin_size
     
-    with pq.ParquetWriter(writing_output_file, final_schema, compression='snappy') as writer:
+    with pq.ParquetWriter(writing_output_file, schema_with_meta, compression='snappy') as writer:
         with tqdm(total=total_rows, desc="Merging & Bucketing", disable=not progress_bar, dynamic_ncols=True) as pbar:
             while min_heap:
                 mass: float
@@ -422,7 +464,7 @@ def write_digested_peptides(
                 pointers[chunk_idx] += 1
 
                 if len(buffer) >= 100_000:
-                    table = buffer.to_table(final_schema)
+                    table = buffer.to_table(schema_with_meta)
                     writer.write_table(table)
                     buffer.clear()
 
@@ -435,7 +477,7 @@ def write_digested_peptides(
                 pbar.update(1)
 
             if buffer:
-                table = buffer.to_table(final_schema)
+                table = buffer.to_table(schema_with_meta)
                 writer.write_table(table)
 
     writing_output_file.rename(final_output_file)
@@ -453,7 +495,7 @@ def digest(
     decoy_strategy: Literal["reverse", "shuffle", "fused"]="reverse",
     progress_bar: bool=True,
     num_workers: Optional[int]=None,
-    worker_batch_size: int=50_000,
+    worker_batch_size: int=5_000,
     sort_buffer_size: int=10_000
 ):
     logger.debug(f"Starting digestion with config: {config}")
@@ -472,11 +514,16 @@ def digest(
     
     logger.debug(f"Digesting {db_file}")
     valid_aa = set(c[0] for c in CANONICAL.keys() if c[0].isalpha())
-    peptides_generator = _digest(
+    raw_peptides_generator = _digest(
         db_file,
         config,
         valid_aa,
         decoy_prefix
+    )
+
+    unique_peptides_generator = aggregate_and_resolve_collisions(
+        raw_peptides_generator,
+        progress_bar
     )
 
     fixed_mods, var_mods, swap_map = _construct_mods_dict(
@@ -488,7 +535,7 @@ def digest(
     logger.debug(f"Swap map: {swap_map}")
 
     peptide_metadata_file = write_digested_peptides(
-        peptides_generator,
+        unique_peptides_generator,
         output_dir,
         tokenizer,
         config.max_mods,
