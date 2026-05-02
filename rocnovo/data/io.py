@@ -22,7 +22,7 @@ class BufferItem:
     scan_id: str
     precursor_mz: float
     charge: int
-    mz: npt.NDArray[np.float64]
+    mz: npt.NDArray[np.float32]
     intensity: npt.NDArray[np.float32]
 
 @dataclass
@@ -34,7 +34,7 @@ class BatchBuffer:
     scan_id: list[str] = field(default_factory=list)
     precursor_mz: list[float] = field(default_factory=list)
     charge: list[int] = field(default_factory=list)
-    mz: list[npt.NDArray[np.float64]] = field(default_factory=list)
+    mz: list[npt.NDArray[np.float32]] = field(default_factory=list)
     intensity: list[npt.NDArray[np.float32]] = field(default_factory=list)
 
     def append(self, item: BufferItem):
@@ -83,7 +83,7 @@ class BaseParser(ABC):
         pass
 
     def iter_spectra(self) -> Generator[BufferItem | AnnotatedBufferItem, None, None]:
-        skipped = 0 
+        skipped = 0
         with self.open() as spectra:
             for spectrum in spectra:
                 try:
@@ -112,7 +112,7 @@ class MgfParser(BaseParser):
             
             for line in f:
                 line = line.strip()
-                if not line: 
+                if not line:
                     continue
                 
                 if line == "BEGIN IONS":
@@ -323,6 +323,9 @@ def format_to_hdf5(
         group = index.create_group("0")
         group.attrs["path"] = str(ms_data_path)
         group.attrs["ms_level"] = ms_level
+        group.attrs["n_spectra"] = n_spectra
+        group.attrs["n_peaks"] = n_peaks
+        group.attrs["annotated"] = annotated
         meta_ds = group.create_dataset(
             "metadata",
             shape=(n_spectra,),
@@ -383,7 +386,3 @@ def format_to_hdf5(
                 flush_batch()
 
         flush_batch()
-        group.attrs["n_spectra"] = n_spectra
-        group.attrs["n_peaks"] = n_peaks
-        index.attrs["ms_level"] = ms_level
-        index.attrs["annotated"] = annotated
