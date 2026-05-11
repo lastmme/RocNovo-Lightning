@@ -1,16 +1,16 @@
 import h5py
 from pathlib import Path
-from typing import Union
 
 from torch.utils.data import Dataset
 
+from rocnovo.common.io import normalize_path
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 
 class SpectrumStream(Dataset):
     def __init__(
         self,
-        h5_path: Union[str, Path],
+        h5_path: str | Path,
         spectrum_tokenizer: SpectrumTokenizer
     ):
         super().__init__()
@@ -66,7 +66,7 @@ class SpectrumStream(Dataset):
 class DeNovoStream(SpectrumStream):
     def __init__(
         self,
-        h5_path: Union[str, Path],
+        h5_path: str | Path,
         spectrum_tokenizer: SpectrumTokenizer,
         peptide_tokenizer: PTMPeptideTokenizer,
     ):
@@ -82,7 +82,7 @@ class DeNovoStream(SpectrumStream):
 class BiDirectDeNovoStream(SpectrumStream):
     def __init__(
         self,
-        h5_path: Union[str, Path],
+        h5_path: str | Path,
         spectrum_tokenizer: SpectrumTokenizer,
         peptide_tokenizer: PTMPeptideTokenizer,
     ):
@@ -95,3 +95,74 @@ class BiDirectDeNovoStream(SpectrumStream):
         peptide_tokens = self.peptide_tokenizer.tokenize(peptide)
         peptide_tokens_reverse = self.peptide_tokenizer.reverse_tokenize(peptide)
         return spectrum, precursor_mz, precursor_charge, peptide_tokens, peptide_tokens_reverse
+
+class PeptideMetadataStream(Dataset):
+    def __init__(self, peptide_metadata_file: str | Path):
+        super().__init__()
+        self.peptide_metadata_file = peptide_metadata_file
+        self._h5_file = None 
+        with h5py.File(peptide_metadata_file, 'r') as f:
+            self.length = f['mass'].shape[0]
+
+    def _get_file(self):
+        if self._h5_file is None:
+            self._h5_file = h5py.File(self.peptide_metadata_file, 'r')
+        return self._h5_file
+
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx: int):
+        h5f = self._get_file()
+        return {
+            "id": idx + 1,
+            "mass": h5f['mass'][idx],
+            "modified_peptide": h5f['modified_peptide'][idx].decode(),
+            "peptide": h5f['peptide'][idx].decode(),
+            "protein_id": h5f['protein_id'][idx],
+            "is_decoy": h5f['is_decoy'][idx]
+        }
+
+    def __del__(self):
+        if self._h5_file is not None:
+            self._h5_file.close()
+
+class DBSearchDataset(Dataset):
+    def __init__(
+        self,
+        spectrum_stream: SpectrumStream,
+        peptide_metadata_stream: PeptideMetadataStream,
+        peptide_tokenizer: PTMPeptideTokenizer,
+        stage1_score_file: str | Path
+    ):
+        super().__init__()
+        self.spectrum_stream = spectrum_stream
+        self.peptide_metadata_stream = peptide_metadata_stream
+        self.peptide_tokenizer = peptide_tokenizer
+        self.stage1_score_file = normalize_path(stage1_score_file)
+        self._h5_file = None
+        with h5py.File(self.stage1_score_file, 'r') as f:
+            self.length = f['spectrum_id'].shape[0]
+
+    def _get_file(self):
+        if self._h5_file is None:
+            self._h5_file = h5py.File(self.stage1_score_file, 'r')
+        return self._h5_file
+
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx: int):
+        h5f = self._get_file()
+        real_spectrum_idx = h5f['spectrum_id'][idx]
+        real_peptide_idx = h5f['peptide_id'][idx]
+        spectrum, precursor_mz, precursor_charge = self.spectrum_stream[real_spectrum_idx]
+        peptide_metadata = self.peptide_metadata_stream[real_peptide_idx]
+        modified_peptide_str = peptide_metadata["modified_peptide"]
+        peptide_tokens = self.peptide_tokenizer.tokenize(modified_peptide_str)
+        peptide_tokens_reverse = self.peptide_tokenizer.reverse_tokenize(modified_peptide_str)
+        return spectrum, precursor_mz, precursor_charge, peptide_tokens, peptide_tokens_reverse, real_spectrum_idx, real_peptide_idx
+    
+    def __del__(self):
+        if self._h5_file is not None:
+            self._h5_file.close()
