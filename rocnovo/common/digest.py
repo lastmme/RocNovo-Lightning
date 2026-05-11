@@ -6,17 +6,19 @@ import shutil
 import heapq
 from pathlib import Path
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Generator, Optional
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
+import h5py
+import numpy as np
 from pyteomics.parser import isoforms, cleave
 from pyteomics import fasta
 from tqdm import tqdm
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from rocnovo.config.db import FIXED_MODS, VAR_MODS, DigestConfig, Peptide, BucketConfig
+from rocnovo.config.db import FIXED_MODS, VAR_MODS, DigestConfig, Peptide, BucketConfig, DecoyConfig
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, CANONICAL
 from rocnovo.common.logger import logger
 
@@ -28,46 +30,41 @@ class ExternalSortBatchData:
     protein_id: list[str]
     is_decoy: list[bool]
 
-@dataclass
-class Buffer:
-    ids: list[int] = field(default_factory=list)
-    bucket_ids: list[int] = field(default_factory=list)
-    masses: list[float] = field(default_factory=list)
-    modified_peptides: list[str] = field(default_factory=list)
-    peptides: list[str] = field(default_factory=list)
-    protein_ids: list[str] = field(default_factory=list)
-    is_decoys: list[bool] = field(default_factory=list)
+class HDF5Buffer:
+    def __init__(self, capacity: int=100_000):
+        self.capacity = capacity
+        self.size = 0
+        self.masses = np.zeros(capacity, dtype=np.float64)
+        self.modified_peptides = np.empty(capacity, dtype=object)
+        self.peptides = np.empty(capacity, dtype=object)
+        self.protein_ids = np.empty(capacity, dtype=object)
+        self.is_decoys = np.zeros(capacity, dtype=np.bool_)
 
-    def append_row(self, global_id: int, bucket_id: int, mass: float, data_pool: ExternalSortBatchData, ptr: int):
-        self.ids.append(global_id)
-        self.bucket_ids.append(bucket_id)
-        self.masses.append(mass)
-        self.modified_peptides.append(data_pool.modified_peptides[ptr])
-        self.peptides.append(data_pool.peptide[ptr])
-        self.protein_ids.append(data_pool.protein_id[ptr])
-        self.is_decoys.append(data_pool.is_decoy[ptr])
+    def append_row(self, mass: float, data_pool: ExternalSortBatchData, ptr: int):
+        self.masses[self.size] = mass
+        self.modified_peptides[self.size] = data_pool.modified_peptides[ptr]
+        self.peptides[self.size] = data_pool.peptide[ptr]
+        self.protein_ids[self.size] = data_pool.protein_id[ptr]
+        self.is_decoys[self.size] = data_pool.is_decoy[ptr]
+        self.size += 1
 
     def __len__(self):
-        return len(self.ids)
+        return self.size
 
     def clear(self):
-        self.ids.clear()
-        self.bucket_ids.clear()
-        self.masses.clear()
-        self.modified_peptides.clear()
-        self.peptides.clear()
-        self.protein_ids.clear()
-        self.is_decoys.clear()
+        self.size = 0
 
-    def to_table(self, schema: pa.Schema):
-        return pa.Table.from_arrays(
-            [
-                self.ids, self.bucket_ids, self.masses, 
-                self.modified_peptides, self.peptides, 
-                self.protein_ids, self.is_decoys
-            ],
-            schema=schema
-        )
+    def flush_to_hdf5(self, h5_file: h5py.File, start_offset: int):
+        if self.size == 0:
+            return
+        
+        end_offset = start_offset + self.size
+        h5_file['mass'][start_offset:end_offset] = self.masses[:self.size]
+        h5_file['modified_peptide'][start_offset:end_offset] = self.modified_peptides[:self.size]
+        h5_file['peptide'][start_offset:end_offset] = self.peptides[:self.size]
+        h5_file['protein_id'][start_offset:end_offset] = self.protein_ids[:self.size]
+        h5_file['is_decoy'][start_offset:end_offset] = self.is_decoys[:self.size]
+        self.clear()
 
 def _construct_mods_dict(
     allowed_fixed_mods: list[str]=FIXED_MODS,
@@ -295,11 +292,18 @@ def write_digested_peptides(
     sort_buffer_size: int=10_000
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
-    final_output_file = output_dir.joinpath("peptides.parquet")
-    writing_output_file = output_dir.joinpath("writing_peptides.parquet")
+    final_output_file = output_dir.joinpath("peptides_metadata.hdf5")
+    writing_output_file = output_dir.joinpath("writing_peptides.hdf5")
     temp_sort_dir = output_dir.joinpath("tmp_parallel_chunks")
     
     if final_output_file.exists():
+        logger.info(f"The peptides table is already stored.")
+        schema_metadata = h5py.File(final_output_file).attrs
+        logging_buffer = ["Bucket information is"]
+        for key, value in schema_metadata.items():
+            logging_buffer.append(f"{key.decode}: {value.decode}")
+        
+        logger.info(f"{''.join(logging_buffer)}")
         return final_output_file
     
     shutil.rmtree(temp_sort_dir, ignore_errors=True)
@@ -369,23 +373,6 @@ def write_digested_peptides(
     logger.info(f"Total digesting time: {end - start:.2f} seconds.")
 
     logger.info(f"K-way merging {len(chunk_files)} sorted chunks...")
-    final_schema = pa.schema([
-        ("id", pa.int64()),
-        ("bucket_id", pa.int32()),
-        ("mass", pa.float64()),
-        ("modified_peptide", pa.string()),
-        ("peptide", pa.string()),
-        ("protein_id", pa.string()),
-        ("is_decoy", pa.bool_())
-    ])
-    custom_metadata = {
-        b"rocnovo_min_mass": str(bucket_config.min_mass).encode('utf-8'),
-        b"rocnovo_max_mass": str(bucket_config.max_mass).encode('utf-8'),
-        b"rocnovo_bin_size": str(bucket_config.bin_size).encode('utf-8'),
-        b"rocnovo_db_version": b"1.0.0"
-    }
-    schema_with_meta = final_schema.with_metadata(custom_metadata)
-    
     min_heap = []
     iterators = [pq.ParquetFile(f).iter_batches(sort_buffer_size) for f in chunk_files]
     batches: list[Optional[ExternalSortBatchData]] = [None] * len(chunk_files)
@@ -439,11 +426,27 @@ def write_digested_peptides(
             batches[idx] = None
             return False
     
-    global_id = 1
-    buffer = Buffer()
     bucket_bin_width = (bucket_config.max_mass - bucket_config.min_mass) / bucket_config.bin_size
-    
-    with pq.ParquetWriter(writing_output_file, schema_with_meta, compression='snappy') as writer:
+    num_buckets = bucket_config.bin_size + 1
+    bucket_bounds = np.full((num_buckets, 2), -1, dtype=np.int64)
+    buffer = HDF5Buffer(capacity=100_000)
+    global_offset = 0
+    current_bucket = -1
+    dt_str = h5py.string_dtype(encoding='utf-8')
+    with h5py.File(writing_output_file, 'w') as h5_file:
+        chunk_size = (min(100_000, max(total_rows, 1)),)
+        h5_file.create_dataset('mass', shape=(total_rows,), dtype=np.float64, chunks=chunk_size, compression='lzf')
+        h5_file.create_dataset('modified_peptide', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
+        h5_file.create_dataset('peptide', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
+        h5_file.create_dataset('protein_id', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
+        h5_file.create_dataset('is_decoy', shape=(total_rows,), dtype=np.bool_, chunks=chunk_size, compression='lzf')
+        
+        h5_file.attrs["rocnovo_min_mass"] = bucket_config.min_mass
+        h5_file.attrs["rocnovo_max_mass"] = bucket_config.max_mass
+        h5_file.attrs["rocnovo_bin_size"] = bucket_config.bin_size
+        h5_file.attrs["rocnovo_bin_width"] = bucket_bin_width
+        h5_file.attrs["rocnovo_db_version"] = "1.0.0"
+        h5_file.attrs["num_rows"] = total_rows
         with tqdm(total=total_rows, desc="Merging & Bucketing", disable=not progress_bar, dynamic_ncols=True) as pbar:
             while min_heap:
                 mass: float
@@ -452,21 +455,21 @@ def write_digested_peptides(
                 ptr = pointers[chunk_idx]
                 data_pool = batches[chunk_idx]
                 bucket_id = int((mass - bucket_config.min_mass) // bucket_bin_width)
-                
-                buffer.append_row(
-                    global_id,
-                    bucket_id,
-                    mass,
-                    data_pool,
-                    ptr
-                )
-                global_id += 1
-                pointers[chunk_idx] += 1
+                bucket_id = max(0, min(bucket_id, num_buckets - 1))
 
-                if len(buffer) >= 100_000:
-                    table = buffer.to_table(schema_with_meta)
-                    writer.write_table(table)
-                    buffer.clear()
+                if bucket_id != current_bucket:
+                    if current_bucket != -1:
+                        bucket_bounds[current_bucket, 1] = global_offset
+                    
+                    bucket_bounds[bucket_id, 0] = global_offset
+                    current_bucket = bucket_id
+                
+                buffer.append_row(mass, data_pool, ptr)
+                if len(buffer) >= buffer.capacity:
+                    buffer.flush_to_hdf5(h5_file, global_offset + 1 - buffer.size)
+                
+                global_offset += 1
+                pointers[chunk_idx] += 1
 
                 if pointers[chunk_idx] < batch_limits[chunk_idx]:
                     next_ptr = pointers[chunk_idx]
@@ -476,9 +479,13 @@ def write_digested_peptides(
 
                 pbar.update(1)
 
-            if buffer:
-                table = buffer.to_table(schema_with_meta)
-                writer.write_table(table)
+            if len(buffer) > 0:
+                buffer.flush_to_hdf5(h5_file, global_offset - buffer.size)
+
+            if current_bucket != -1:
+                bucket_bounds[current_bucket, 1] = global_offset
+        
+        h5_file.create_dataset('bucket_bounds', data=bucket_bounds, compression='lzf')
 
     writing_output_file.rename(final_output_file)
     shutil.rmtree(temp_sort_dir, ignore_errors=True)
@@ -490,9 +497,7 @@ def digest(
     output_dir: Path,
     tokenizer: PTMPeptideTokenizer,
     bucket_config: BucketConfig,
-    decoy_prefix: str="DECOY_",
-    generate_decoy: bool=True,
-    decoy_strategy: Literal["reverse", "shuffle", "fused"]="reverse",
+    decoy_config: DecoyConfig,
     progress_bar: bool=True,
     num_workers: Optional[int]=None,
     worker_batch_size: int=5_000,
@@ -502,13 +507,13 @@ def digest(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.debug(f"Output directory: {output_dir}")
     db_file = fasta_path
-    if generate_decoy:
+    if decoy_config.generate_decoy:
         logger.warning("No decoy FASTA provided. Using the default decoy generation method (reverse sequence).")
         db_file = decoy(
             fasta_path,
             output_dir,
-            decoy_prefix,
-            decoy_strategy,
+            decoy_config.decoy_prefix,
+            decoy_config.decoy_strategy,
             progress_bar
         )
     
@@ -518,7 +523,7 @@ def digest(
         db_file,
         config,
         valid_aa,
-        decoy_prefix
+        decoy_config.decoy_prefix
     )
 
     unique_peptides_generator = aggregate_and_resolve_collisions(

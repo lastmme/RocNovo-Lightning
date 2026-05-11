@@ -46,10 +46,15 @@ class Peptide:
 
 @dataclass(frozen=True)
 class BucketConfig:
-    bin_size: int=100_000
+    bin_size: int=50_000
     min_mass: float=400.0
     max_mass: float=6_000.0
 
     def __post_init__(self):
         if self.min_mass > self.max_mass:
             raise ValueError("min_mass must be less than or equal to max_mass.")
+@dataclass(frozen=True)
+class DecoyConfig:
+    decoy_prefix: str="DECOY_"
+    generate_decoy: bool=True
+    decoy_strategy: Literal["reverse", "shuffle", "fused"]="reverse"
