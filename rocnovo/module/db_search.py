@@ -321,11 +321,10 @@ class DBSearcher:
         return save_file
 
     def stage2_scoring(self, datamodule: DBSearchDataLoaderModule):
-        def pll(logits: torch.Tensor, targets: torch.LongTensor):
+        def pll(logits: torch.Tensor, targets: torch.LongTensor, mask: torch.BoolTensor):
             log_probs = F.log_softmax(logits, dim=-1)
             # [B, S, 1] -> [B, S]
             step_log_probs = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-            mask = (targets != SPECIAL_TOKENS[PAD]).float()
             # [B]
             scores = (step_log_probs * mask).sum(dim=-1)
             return scores
@@ -346,31 +345,39 @@ class DBSearcher:
             h5_file.attrs["n_rows"] = total_rows
             offset = 0
             
-            for batch in tqdm(dataloader, desc="Stage2 Scoring", total=len(dataloader), dynamic_ncols=True, disable=not self.progress_bar):
-                batch: DBSearchBatch = batch.to(self.device)
-                with torch.no_grad():
+            with torch.no_grad():
+                for batch in tqdm(dataloader, desc="Stage2 Scoring", total=len(dataloader), dynamic_ncols=True, disable=not self.progress_bar):
+                    batch: DBSearchBatch = batch.to(self.device)
                     mem_hidden_states, mem_attention_mask = self.model.encode_spectrum(batch.spectra)
                     prompt_hidden_states = self.model.prefill(batch.spectra)
                     output: DecoderOutput
                     output_reverse: DecoderOutput
                     output, output_reverse = self.model.peptide_decoder(
-                        batch.peptide.tokens,
-                        batch.peptide_reverse.tokens,
+                        batch.peptide.tokens[:, :-1],
+                        batch.peptide_reverse.tokens[:, :-1],
                         batch.spectra.precursor,
                         mem_hidden_states,
                         mem_attention_mask,
                         prompt_hidden_states
                     )
-                    forward_scores = pll(output.logits, batch.peptide.tokens)
-                    reverse_scores = pll(output_reverse.logits, batch.peptide_reverse.tokens)
+                    forward_scores = pll(
+                        output.logits,
+                        batch.peptide.tokens[:, :-1],
+                        batch.peptide.mask[:, :-1]
+                    )
+                    reverse_scores = pll(
+                        output_reverse.logits,
+                        batch.peptide_reverse.tokens[:, 1:],
+                        batch.peptide_reverse.mask[:, 1:]
+                    )
                     final_scores = (forward_scores + reverse_scores) / 2
-                
-                current_batch_size = final_scores.shape[0]
-                end_idx = offset + current_batch_size
-                h5_file['score'][offset:end_idx] = final_scores.cpu().numpy()
-                h5_file['spectrum_id'][offset:end_idx] = batch.spectrum_id.cpu().numpy()
-                h5_file['peptide_id'][offset:end_idx] = batch.peptide_id.cpu().numpy()
-                offset += current_batch_size
+                    
+                    current_batch_size = final_scores.shape[0]
+                    end_idx = offset + current_batch_size
+                    h5_file['score'][offset:end_idx] = final_scores.cpu().numpy()
+                    h5_file['spectrum_id'][offset:end_idx] = batch.spectrum_id.cpu().numpy()
+                    h5_file['peptide_id'][offset:end_idx] = batch.peptide_id.cpu().numpy()
+                    offset += current_batch_size
         
         return save_file
 
