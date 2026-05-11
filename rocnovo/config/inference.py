@@ -6,11 +6,11 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class InferenceConfig:
-    num_beams: int=10, # 0 means greedy search
-    min_len: int=6,
-    max_len: int=80,
-    max_isotope: int=1,
-    mass_tolerance: float=50.0,
+    num_beams: int=10 # 0 means greedy search
+    min_len: int=6
+    max_len: int=80
+    max_isotope: int=1
+    mass_tolerance: float=50.0
     gradscaling_enabled: bool=True
 
 @dataclass(frozen=True)
