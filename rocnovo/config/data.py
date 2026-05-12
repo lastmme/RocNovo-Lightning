@@ -90,7 +90,6 @@ class BidirectTrainBatch(TrainBatch):
 @dataclass(frozen=True)
 class DBSearchBatch(BidirectTrainBatch):
     spectrum_id: torch.LongTensor
-    peptide_id: torch.LongTensor
 
     def to(self, device: torch.device):
         return replace(
@@ -98,8 +97,7 @@ class DBSearchBatch(BidirectTrainBatch):
             spectra=self.spectra.to(device),
             peptide=self.peptide.to(device),
             peptide_reverse=self.peptide_reverse.to(device),
-            spectrum_id=self.spectrum_id.to(device),
-            peptide_id=self.peptide_id.to(device)
+            spectrum_id=self.spectrum_id.to(device)
         )
 @dataclass(frozen=True)
 class InferenceBatch:

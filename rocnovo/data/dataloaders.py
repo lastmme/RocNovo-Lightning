@@ -7,6 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from pytorch_lightning import LightningDataModule
 
+from rocnovo.common.io import normalize_path
 from rocnovo.config.data import BidirectTrainBatch, TrainBatch, InferenceBatch, Spectra, Peptide, Precursor, DataConfig, DBSearchBatch
 from rocnovo.data.datasets import DeNovoStream, SpectrumStream, BiDirectDeNovoStream, PeptideMetadataStream, DBSearchDataset
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
@@ -75,14 +76,12 @@ def dbsearch_collate_fn(batch: list[tuple]):
     base_batch = [item[:5] for item in batch]
     processed_batch = bidirect_denovo_collate_fn(base_batch)
     spectrum_ids = [item[5] for item in batch]
-    peptide_ids = [item[6] for item in batch]
     
     return DBSearchBatch(
-        spectra=processed_batch.spectra,
-        peptide=processed_batch.peptide,
-        peptide_reverse=processed_batch.peptide_reverse,
-        spectrum_id=torch.tensor(spectrum_ids, dtype=torch.long),
-        peptide_id=torch.tensor(peptide_ids, dtype=torch.long)
+        processed_batch.spectra,
+        processed_batch.peptide,
+        processed_batch.peptide_reverse,
+        torch.tensor(spectrum_ids, dtype=torch.long)
     )
 
 class BaseDataModule(LightningDataModule):
@@ -123,7 +122,8 @@ class BaseDataModule(LightningDataModule):
             collate_fn=self.custom_collatefn,
             num_workers=self.data_config.n_workers,
             shuffle=False,
-            pin_memory=True
+            pin_memory=True,
+            persistent_workers=True
         )
 
 class SpectraDataLoaderModule(BaseDataModule):
@@ -219,7 +219,6 @@ class DBSearchDataLoaderModule(BaseDataModule):
         data_config: DataConfig,
         spectrum_tokenizer: SpectrumTokenizer,
         peptide_tokenizer: PTMPeptideTokenizer,
-        peptide_metadata_file: Path | str,
         stage1_score_file: Path | str
     ):
         self.data_config = data_config
@@ -227,18 +226,16 @@ class DBSearchDataLoaderModule(BaseDataModule):
         
         self.spectrum_tokenizer = spectrum_tokenizer
         self.spectrum_tokenizer.disable_aug()
-        
         self.peptide_tokenizer = peptide_tokenizer
+        self.stage1_score_file = normalize_path(stage1_score_file)
+        
         self.test_dataset = DBSearchDataset(
             SpectrumStream(
                 data_config.test_path,
                 spectrum_tokenizer
             ),
-            PeptideMetadataStream(
-                peptide_metadata_file
-            ),
             self.peptide_tokenizer,
-            stage1_score_file
+            self.stage1_score_file
         )
     
     def train_dataloader(self):

@@ -1,3 +1,5 @@
+import os
+import warnings
 from typing import Literal, get_args
 from dataclasses import dataclass, field
 
@@ -58,3 +60,24 @@ class DecoyConfig:
     decoy_prefix: str="DECOY_"
     generate_decoy: bool=True
     decoy_strategy: Literal["reverse", "shuffle", "fused"]="reverse"
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    topk: int=10
+    n_workers: int=field(default_factory=lambda: max(1, os.cpu_count() - 2))
+    worker_batch_size: int=5_000
+    sort_buffer_size: int=10_000
+    flush_batch_size: int=100_000
+    progress_bar: bool=True
+    overwrite: bool=False
+
+    def __post_init__(self):
+        if self.topk <= 0:
+            raise ValueError(f"topk should be larger than 0, current value: {self.topk}")
+        
+        if self.n_workers < 0:
+            raise ValueError(f"n_workers: {self.n_workers}")
+        
+        if self.flush_batch_size < 100:
+            warnings.warn(f"flush_batch_size ({self.flush_batch_size}) is too small, may restrict HDF5 I/O speed. we suggest it should be larger than 1000.")

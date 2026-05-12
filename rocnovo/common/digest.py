@@ -59,11 +59,14 @@ class HDF5Buffer:
             return
         
         end_offset = start_offset + self.size
-        h5_file['mass'][start_offset:end_offset] = self.masses[:self.size]
-        h5_file['modified_peptide'][start_offset:end_offset] = self.modified_peptides[:self.size]
-        h5_file['peptide'][start_offset:end_offset] = self.peptides[:self.size]
-        h5_file['protein_id'][start_offset:end_offset] = self.protein_ids[:self.size]
-        h5_file['is_decoy'][start_offset:end_offset] = self.is_decoys[:self.size]
+        meta_ds = h5_file["metadata"]
+        temp_struct = np.empty(self.size, dtype=meta_ds.dtype)
+        temp_struct["mass"] = self.masses[:self.size]
+        temp_struct["modified_peptide"] = self.modified_peptides[:self.size]
+        temp_struct["peptide"] = self.peptides[:self.size]
+        temp_struct["protein_id"] = self.protein_ids[:self.size]
+        temp_struct["is_decoy"] = self.is_decoys[:self.size]
+        meta_ds[start_offset:end_offset] = temp_struct
         self.clear()
 
 def _construct_mods_dict(
@@ -170,16 +173,26 @@ def _digest(
                 decoy_prefix
             )
 
-def decoy(fasta_path: Path, output_dir: Path, decoy_prefix: str="DECOY_", mode: Literal["reverse", "shuffle", "fused"]="reverse", progress_bar: bool=True):
+def decoy(
+    fasta_path: Path,
+    output_dir: Path,
+    decoy_prefix: str="DECOY_",
+    mode: Literal["reverse", "shuffle", "fused"]="reverse",
+    progress_bar: bool=True,
+    overwrite: bool=False
+):
     total = None
     if progress_bar:
         total = sum(1 for _ in fasta.read(str(fasta_path)))
     
     db_file = output_dir.joinpath(f"{fasta_path.stem}_with_decoy{fasta_path.suffix}")
-    if db_file.exists():
-        logger.warning(f"File {db_file} already exists, skipping.")
+    if db_file.exists() and not overwrite:
+        logger.warning(f"File {db_file} already exists, skip.")
         return db_file
-
+    
+    if overwrite and db_file.exists():
+        db_file.unlink()
+    
     shutil.copy(fasta_path, db_file)
     with tqdm(total=total, desc="Generating decoy sequences", unit=" sequences", disable=not progress_bar, dynamic_ncols=True) as pbar:
         with open(fasta_path, "r") as input_f, open(db_file, "a") as output_f:
@@ -289,19 +302,20 @@ def write_digested_peptides(
     progress_bar: bool=True,
     num_workers: Optional[int]=None,
     worker_batch_size: int=5_000,
-    sort_buffer_size: int=10_000
+    sort_buffer_size: int=10_000,
+    flush_batch_size: int=100_000,
+    overwrite: bool=False
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     final_output_file = output_dir.joinpath("peptides_metadata.hdf5")
     writing_output_file = output_dir.joinpath("writing_peptides.hdf5")
     temp_sort_dir = output_dir.joinpath("tmp_parallel_chunks")
-    
-    if final_output_file.exists():
+    if final_output_file.exists() and not overwrite:
         logger.info(f"The peptides table is already stored.")
         schema_metadata = h5py.File(final_output_file).attrs
         logging_buffer = ["Bucket information is"]
         for key, value in schema_metadata.items():
-            logging_buffer.append(f"{key.decode}: {value.decode}")
+            logging_buffer.append(f" {key}: {value}")
         
         logger.info(f"{''.join(logging_buffer)}")
         return final_output_file
@@ -429,24 +443,27 @@ def write_digested_peptides(
     bucket_bin_width = (bucket_config.max_mass - bucket_config.min_mass) / bucket_config.bin_size
     num_buckets = bucket_config.bin_size + 1
     bucket_bounds = np.full((num_buckets, 2), -1, dtype=np.int64)
-    buffer = HDF5Buffer(capacity=100_000)
+    buffer = HDF5Buffer(capacity=flush_batch_size)
     global_offset = 0
     current_bucket = -1
     dt_str = h5py.string_dtype(encoding='utf-8')
     with h5py.File(writing_output_file, 'w') as h5_file:
-        chunk_size = (min(100_000, max(total_rows, 1)),)
-        h5_file.create_dataset('mass', shape=(total_rows,), dtype=np.float64, chunks=chunk_size, compression='lzf')
-        h5_file.create_dataset('modified_peptide', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
-        h5_file.create_dataset('peptide', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
-        h5_file.create_dataset('protein_id', shape=(total_rows,), dtype=dt_str, chunks=chunk_size, compression='lzf')
-        h5_file.create_dataset('is_decoy', shape=(total_rows,), dtype=np.bool_, chunks=chunk_size, compression='lzf')
+        chunk_size = (min(flush_batch_size, max(total_rows, 1)),)
+        metadata_dtype = np.dtype([
+            ("mass", np.float64),
+            ("modified_peptide", dt_str),
+            ("peptide", dt_str),
+            ("protein_id", dt_str),
+            ("is_decoy", np.bool_)
+        ])
+        h5_file.create_dataset("metadata", shape=(total_rows,), dtype=metadata_dtype, chunks=chunk_size)
         
         h5_file.attrs["rocnovo_min_mass"] = bucket_config.min_mass
         h5_file.attrs["rocnovo_max_mass"] = bucket_config.max_mass
         h5_file.attrs["rocnovo_bin_size"] = bucket_config.bin_size
         h5_file.attrs["rocnovo_bin_width"] = bucket_bin_width
         h5_file.attrs["rocnovo_db_version"] = "1.0.0"
-        h5_file.attrs["num_rows"] = total_rows
+        h5_file.attrs["n_rows"] = total_rows
         with tqdm(total=total_rows, desc="Merging & Bucketing", disable=not progress_bar, dynamic_ncols=True) as pbar:
             while min_heap:
                 mass: float
@@ -485,7 +502,7 @@ def write_digested_peptides(
             if current_bucket != -1:
                 bucket_bounds[current_bucket, 1] = global_offset
         
-        h5_file.create_dataset('bucket_bounds', data=bucket_bounds, compression='lzf')
+        h5_file.create_dataset("bucket_bounds", data=bucket_bounds)
 
     writing_output_file.rename(final_output_file)
     shutil.rmtree(temp_sort_dir, ignore_errors=True)
@@ -501,7 +518,9 @@ def digest(
     progress_bar: bool=True,
     num_workers: Optional[int]=None,
     worker_batch_size: int=5_000,
-    sort_buffer_size: int=10_000
+    sort_buffer_size: int=10_000,
+    flush_batch_size: int=100_000,
+    overwrite: bool=False
 ):
     logger.debug(f"Starting digestion with config: {config}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -514,7 +533,8 @@ def digest(
             output_dir,
             decoy_config.decoy_prefix,
             decoy_config.decoy_strategy,
-            progress_bar
+            progress_bar,
+            overwrite
         )
     
     logger.debug(f"Digesting {db_file}")
@@ -551,6 +571,8 @@ def digest(
         progress_bar,
         num_workers,
         worker_batch_size,
-        sort_buffer_size
+        sort_buffer_size,
+        flush_batch_size,
+        overwrite
     )
     return peptide_metadata_file
