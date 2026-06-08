@@ -35,12 +35,14 @@ class Clip(BaseModule):
             self.model_config["spectrum"]["hidden_size"],
             1
         )
-        if self.model_config["learnable_logits_scale"]:
+        learnable_logits_scale = self.model_config.get("learnable_logits_scale", True)
+        logits_scale = self.model_config["logits_scale"]
+        if learnable_logits_scale:
             self.logits_scale = nn.Parameter(
-                torch.ones([]) * np.log(1 / self.model_config["logits_scale"])
+                torch.ones([]) * np.log(1 / logits_scale)
             )
         else:
-            self.logits_scale = torch.ones([]) * np.log(1 / self.model_config["logits_scale"])
+            self.logits_scale = torch.ones([]) * np.log(1 / logits_scale)
 
     def encode_spectrum(self, spectra: data_config.Spectra):
         pkt, mask = self.spectrum_encoder(spectra)  # (B, L + 1, D)
@@ -151,11 +153,11 @@ def train(config_path: str):
             trainer_config.checkpoint_path,
             map_location="cpu"
         )
-        config = module.config
-        trainer_config = module.trainer_config
-        if trainer_config.checkpoint_path is None:
-            trainer_config.checkpoint_path = checkpoint_path
-            trainer_config.mode = mode
+        if trainer_config.mode == "full_state":
+            trainer_config = module.trainer_config
+            if trainer_config.checkpoint_path is None:
+                trainer_config.checkpoint_path = checkpoint_path
+                trainer_config.mode = mode
     else:
         module = Clip(config.dict())
         logger.debug(f"Start to train clip model from scratch with config")
