@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import rocnovo.config.data as data_config
 import rocnovo.config.model as model_config
 import rocnovo.config.tokenizer as tokenizer_config
+from rocnovo.config.aug import AugmentationConfig
 from rocnovo.config.train import Config, TrainerConfig
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, SPECIAL_TOKENS, PAD
@@ -162,11 +163,11 @@ def train(config_path: str):
             trainer_config.checkpoint_path,
             map_location="cpu"
         )
-        config = module.config
-        trainer_config = module.trainer_config
-        if trainer_config.checkpoint_path is None:
-            trainer_config.checkpoint_path = checkpoint_path
-            trainer_config.mode = mode
+        if trainer_config.mode == "full_state":
+            trainer_config = module.trainer_config
+            if trainer_config.checkpoint_path is None:
+                trainer_config.checkpoint_path = checkpoint_path
+                trainer_config.mode = mode
     else:
         module = Denovo(config.dict())
         logger.debug(f"Start to train denovo model from scratch with config: {config}")
@@ -174,8 +175,11 @@ def train(config_path: str):
     spectrum_tokenizer_config = tokenizer_config.SpectrumTokenizerConfig(**config["tokenizer"]["spectrum"])
     peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
     
+    aug_config = AugmentationConfig(**config["aug"])
+    aug_config.return_dummy_tensor = False
     spectrum_tokenizer = SpectrumTokenizer(**asdict(spectrum_tokenizer_config))
-    spectrum_tokenizer.disable_aug()
+    if aug_config.enabled:
+        spectrum_tokenizer.set_aug_config(aug_config)
     
     peptide_tokenizer = PTMPeptideTokenizer(**asdict(peptide_tokenizer_config))
     data_module = BiDirectDeNovoDataLoaderModule(
