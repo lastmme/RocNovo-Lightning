@@ -8,7 +8,7 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Literal, Generator, Optional
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import h5py
 import numpy as np
@@ -120,6 +120,8 @@ def non_specific_digestion(
                     protein_id.startswith(decoy_prefix)
                 ), skipped
                 skipped = 0
+    
+    yield None, skipped
 
 def synchro_digestion(
     config: DigestConfig,
@@ -147,6 +149,8 @@ def synchro_digestion(
                     protein_id.startswith(decoy_prefix)
                 ), skipped
                 skipped = 0
+    
+    yield None, skipped
 
 def _digest(
     fasta_path: Path,
@@ -210,7 +214,7 @@ def decoy(
     
     return db_file
 
-def aggregate_and_resolve_collisions(peptides_generator: Generator[tuple[Peptide, int], Any, None], progress_bar: bool=True):
+def aggregate_and_resolve_collisions(peptides_generator: Generator[tuple[Peptide | None, int], Any, None], progress_bar: bool=True):
     # we may use the stream to aggregate the peptides to avoid memory issues.
     logger.info("Aggregating shared peptides and resolving Target-Decoy collisions ...")
     peptide_map: dict[str, dict[Literal["target", "decoy"], set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -219,10 +223,11 @@ def aggregate_and_resolve_collisions(peptides_generator: Generator[tuple[Peptide
     for pep, skipped in tqdm(peptides_generator, desc="Aggregating peptides", dynamic_ncols=True, disable=not progress_bar):
         total_skipped += skipped
 
-        if pep.is_decoy:
-            peptide_map[pep.peptide]["decoy"].add(pep.protein_id)
-        else:
-            peptide_map[pep.peptide]["target"].add(pep.protein_id)
+        if pep is not None:
+            if pep.is_decoy:
+                peptide_map[pep.peptide]["decoy"].add(pep.protein_id)
+            else:
+                peptide_map[pep.peptide]["target"].add(pep.protein_id)
 
     logger.info(f"Aggregation complete. Found {len(peptide_map)} unique base sequences. Starting PTM expansion ...")
     
@@ -334,6 +339,7 @@ def write_digested_peptides(
     start = time.time()
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = []
+        future2path: dict[Future, Path] = {}
         current_batch = []
         chunk_idx = 0
         
@@ -342,8 +348,8 @@ def write_digested_peptides(
                 total_skipped_count += skipped_count
                 current_batch.append(peptide)
                 if len(current_batch) >= worker_batch_size:
-                    chunk_path = temp_sort_dir / f"chunk_{chunk_idx + 1:05d}.parquet"
-                    futures.append(executor.submit(
+                    chunk_path = temp_sort_dir.joinpath(f"chunk_{chunk_idx + 1:05d}.parquet")
+                    f = executor.submit(
                         process_peptide_batch,
                         current_batch.copy(),
                         chunk_path,
@@ -353,13 +359,15 @@ def write_digested_peptides(
                         var_mods,
                         swap_map,
                         bucket_config
-                    ))
+                    )
+                    futures.append(f)
+                    future2path[f] = chunk_path
                     current_batch.clear()
                     chunk_idx += 1
             
             if len(current_batch) > 0:
-                chunk_path = temp_sort_dir / f"chunk_{chunk_idx + 1:05d}.parquet"
-                futures.append(executor.submit(
+                chunk_path = temp_sort_dir.joinpath(f"chunk_{chunk_idx + 1:05d}.parquet")
+                f = executor.submit(
                     process_peptide_batch,
                     current_batch,
                     chunk_path,
@@ -369,13 +377,15 @@ def write_digested_peptides(
                     var_mods,
                     swap_map,
                     bucket_config
-                ))
+                )
+                futures.append(f)
+                future2path[f] = chunk_path
         
         for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Waiting for tasks", disable=not progress_bar, dynamic_ncols=True)):
             rows = future.result()
             if rows > 0:
                 total_rows += rows
-                chunk_files.append(temp_sort_dir / f"chunk_{i + 1:05d}.parquet")
+                chunk_files.append(future2path[f])
         
         logger.info(f"Total skipped peptides: {total_skipped_count}")
 
@@ -447,7 +457,7 @@ def write_digested_peptides(
     global_offset = 0
     current_bucket = -1
     dt_str = h5py.string_dtype(encoding='utf-8')
-    with h5py.File(writing_output_file, 'w') as h5_file:
+    with h5py.File(writing_output_file, mode='w') as h5_file:
         chunk_size = (min(flush_batch_size, max(total_rows, 1)),)
         metadata_dtype = np.dtype([
             ("mass", np.float64),
