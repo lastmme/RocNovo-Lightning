@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import LightningModule
@@ -128,12 +127,18 @@ def build_trainer(
         patience=50,
         mode="max" if trainer_config.is_max else "min"
     )
+    if isinstance(trainer_config.validation_steps, int) and trainer_config.validation_steps > 0:
+        check_val_every_n_epoch = None
+    else:
+        check_val_every_n_epoch = 1
+    
     trainer = pl.Trainer(
         max_epochs=trainer_config.max_epochs,
         enable_progress_bar=trainer_config.show_progress_bar,
         log_every_n_steps=10,
         accelerator="gpu",
         val_check_interval=trainer_config.validation_steps,
+        check_val_every_n_epoch=check_val_every_n_epoch,
         devices=trainer_config.devices,
         strategy=trainer_config.distributed if mode == "train" else "auto",
         precision="bf16-mixed" if trainer_config.grad_scaler_enable else "32-true",
@@ -154,24 +159,11 @@ def build_trainer(
     )
     return trainer
 
-def concat_results(results):
-    preds = []
-    labels = []
-
-    for batch in results:
-        preds.append(batch["pred"])
-        labels.append(batch["label"])
-    
-    return {
-        "preds": np.concatenate(preds, axis=0).squeeze(),
-        "labels": np.concatenate(labels, axis=0).squeeze()
-    }
-
 def pipeline(
     module: BaseModule,
     trainer_config: train_configs.TrainerConfig,
     data_module: BaseDataModule,
-    mode: Literal["train", "test", "prediction"]="train"
+    mode: Literal["train"]="train"
 ):
     pl.seed_everything(trainer_config.random_seed)
     torch.set_float32_matmul_precision("medium")
@@ -180,20 +172,11 @@ def pipeline(
         trainer_config,
         mode
     )
-    results = None
     if mode == "train":
         trainer.fit(
             module,
             datamodule=data_module,
             ckpt_path=trainer_config.checkpoint_path if trainer_config.mode == "full_state" else None
         )
-
-    elif mode == "test":
-        # 多卡预测可以考虑在 dataset 中返回 idx 进行处理
-        # 得到结果后，再手动进行去重
-        trainer.test(module, datamodule=data_module)
-        results = concat_results(trainer.model.test_results)
     else:
         raise ValueError(f"mode {mode} not supported")
-
-    return results
