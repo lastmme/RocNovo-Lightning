@@ -9,7 +9,7 @@ class SchedulerConfig:
     enabled: bool=True
     n_cycles: int=1
     lr_decay_factor: float=1.0
-    warmup_steps: int=10000
+    warmup_steps: int | float=0.1
 
 @dataclass
 class OptimizerConfig:
@@ -19,7 +19,7 @@ class OptimizerConfig:
 @dataclass
 class TrainerConfig:
     max_epochs: int
-    validation_steps: int
+    validation_steps: int | float
     model_save_folder: str
     summarywriter_folder: str
     devices: Union[list[int], int]
