@@ -42,7 +42,10 @@ class Clip(BaseModule):
                 torch.ones([]) * np.log(1 / logits_scale)
             )
         else:
-            self.logits_scale = torch.ones([]) * np.log(1 / logits_scale)
+            self.register_buffer(
+                "logits_scale", 
+                torch.ones([]) * np.log(1 / logits_scale)
+            )
 
     def encode_spectrum(self, spectra: data_config.Spectra):
         pkt, mask = self.spectrum_encoder(spectra)  # (B, L + 1, D)
