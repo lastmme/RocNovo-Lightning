@@ -35,6 +35,22 @@ class Precursor:
             mz=einops.repeat(self.mz, "B -> (B S)", S=S),
         )
 
+    def filter_by_mask(self, mask: torch.BoolTensor):
+        return replace(
+            self,
+            mass=self.mass[mask],
+            charge=self.charge[mask],
+            mz=self.mz[mask],
+        )
+
+    def __getitem__(self, item):
+        return replace(
+            self,
+            mass=self.mass[item],
+            charge=self.charge[item],
+            mz=self.mz[item],
+        )
+
 @dataclass(frozen=True)
 class Spectra:
     mz: torch.FloatTensor

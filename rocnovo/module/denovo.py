@@ -62,22 +62,35 @@ class Denovo(BaseModule):
         self,
         tokens: torch.LongTensor,
         tokens_reverse: torch.LongTensor,
-        mem_hidden_states: torch.FloatTensor,
+        mem_hidden_states: Optional[torch.FloatTensor]=None,
         mem_attention_mask: Optional[torch.BoolTensor]=None,
         cache: Optional[model_config.Cache]=None,
         cache_reverse: Optional[model_config.Cache]=None,
-        cache_return_config: model_config.OutputConfig=model_config.default_output_config
+        cache_return_config: model_config.OutputConfig=model_config.default_output_config,
+        precursor: Optional[data_config.Precursor]=None,
     ):
         output: model_config.DecoderOutput
         output_reverse: model_config.DecoderOutput
+
+        if cache is not None and not cache.has_self_cache():
+            step_tokens = tokens
+        else:
+            step_tokens = tokens[:, [-1]]
+        
+        if cache_reverse is not None and not cache_reverse.has_self_cache():
+            step_tokens_reverse = tokens_reverse
+        else:
+            step_tokens_reverse = tokens_reverse[:, [-1]]
+
         output, output_reverse = self.peptide_decoder.decode_with_cache(
-            tokens[:, [-1]],
-            tokens_reverse[:, [-1]],
+            step_tokens,
+            step_tokens_reverse,
             mem_hidden_states,
             mem_attention_mask,
             cache,
             cache_reverse,
-            cache_return_config
+            cache_return_config,
+            precursor
         )
         return output, output_reverse
 

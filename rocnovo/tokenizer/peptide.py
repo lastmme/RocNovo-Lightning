@@ -142,6 +142,36 @@ class PTMPeptideTokenizer:
 
         return self._first_valid_token_idx
 
+    @staticmethod
+    def _extract_peptide_string(seq: npt.NDArray, reverse: bool) -> str:
+        """Extract the peptide string from a token string sequence.
+
+        The sequence is delimited by ``<SOS>`` tokens. Tokens equal to ``<PAD>``
+        or ``<SOS>`` are stripped, so all-PAD invalid candidates are returned as
+        ``""`` instead of ``"PADPAD..."``.
+        """
+        sos_mask = seq == SOS
+        sos_positions = np.where(sos_mask)[0]
+        if len(sos_positions) >= 2:
+            start = sos_positions[0] + 1
+            end = sos_positions[1]
+        elif len(sos_positions) == 1:
+            start = sos_positions[0] + 1
+            end = len(seq)
+        else:
+            start = 0
+            end = len(seq)
+
+        seq_tojoin = seq[start:end]
+        valid_mask = (seq_tojoin != PAD) & (seq_tojoin != SOS)
+        seq_tojoin = seq_tojoin[valid_mask]
+        if len(seq_tojoin) == 0:
+            return ""
+
+        if reverse:
+            seq_tojoin = seq_tojoin[::-1]
+        return "".join(seq_tojoin)
+
     def detokenize_by_array(self, tokens_seq: npt.NDArray):
         """
         Parameters:
@@ -153,27 +183,10 @@ class PTMPeptideTokenizer:
         sequences: [batch_size, max_len]
         """
         tokenized_sequences = self._vocab_array[tokens_seq]
-        sos_mask = tokenized_sequences == SOS
-
-        sequences = []
-
-        for mask, seq in zip(sos_mask, tokenized_sequences):
-            sos_positions = np.where(mask)[0]
-            if len(sos_positions) >= 2:
-                start = sos_positions[0] + 1
-                end = sos_positions[1]
-            elif len(sos_positions) == 1:
-                start = sos_positions[0] + 1
-                end = len(seq)
-            else:
-                # 没有 <SOS>，直接返回整个序列
-                start = 0
-                end = len(seq)
-            seq_tojoin = seq[start:end]
-            if self.reverse:
-                seq_tojoin = seq_tojoin[::-1]
-            sequences.append("".join(seq_tojoin))
-
+        sequences = [
+            self._extract_peptide_string(seq, reverse=self.reverse)
+            for seq in tokenized_sequences
+        ]
         return sequences
     
     def reverse_detokenize_by_array(self, tokens_seq: npt.NDArray):
@@ -187,29 +200,11 @@ class PTMPeptideTokenizer:
         sequences: [batch_size, max_len]
         """
         tokenized_sequences = self._vocab_array[tokens_seq]
-        sos_mask = tokenized_sequences == SOS
-
-        sequences = []
-
-        for mask, seq in zip(sos_mask, tokenized_sequences):
-            sos_positions = np.where(mask)[0]
-            if len(sos_positions) >= 2:
-                start = sos_positions[0] + 1
-                end = sos_positions[1]
-            elif len(sos_positions) == 1:
-                start = sos_positions[0] + 1
-                end = len(seq)
-            else:
-                # 没有 <SOS>，直接返回整个序列
-                start = 0
-                end = len(seq)
-            seq_tojoin = seq[start:end]
-            if not self.reverse:
-                seq_tojoin = seq_tojoin[::-1]
-            sequences.append("".join(seq_tojoin))
-
+        sequences = [
+            self._extract_peptide_string(seq, reverse=not self.reverse)
+            for seq in tokenized_sequences
+        ]
         return sequences
-
 
     def tokenize(self, seq: str):
         seq = seq.replace("I", "L")

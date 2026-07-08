@@ -204,12 +204,13 @@ class SelfAttention(nn.Module):
         )
         atten_output = recover_hidden_states(atten_output)
 
+        past_key_value = None
+        if cache_return_config.return_self_cache:
+            past_key_value = model_config.KVCache(key=k, value=v)
+
         return model_config.AttentionOutput(
             atten_output=atten_output,
-            past_key_value=model_config.KVCache(
-                key=k,
-                value=v,
-            ) if cache_return_config.return_cache else None
+            past_key_value=past_key_value
         )
 
 class CrossAttention(nn.Module):
@@ -235,15 +236,33 @@ class CrossAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        mem_hidden_states: torch.FloatTensor,
+        mem_hidden_states: Optional[torch.FloatTensor]=None,
         mem_attention_mask: Optional[torch.BoolTensor]=None,
+        cross_kv: Optional[model_config.KVCache]=None,
+        cross_kv_index: Optional[torch.LongTensor]=None,
+        cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
         q = self.query(hidden_states)
-        k = self.key(mem_hidden_states)
-        v = self.value(mem_hidden_states)
+        if cross_kv is not None:
+            if cross_kv_index is not None:
+                k = torch.index_select(cross_kv.key, 0, cross_kv_index)
+                v = torch.index_select(cross_kv.value, 0, cross_kv_index)
+            else:
+                k, v = cross_kv.key, cross_kv.value
+        
+        elif mem_hidden_states is not None:
+            k = self.key(mem_hidden_states)
+            v = self.value(mem_hidden_states)
+        
+        else:
+            raise ValueError(
+                "CrossAttention requires either mem_hidden_states or cross_kv."
+            )
+        
         q = prepare_for_scores(q, self.n_head, self.d_head)
-        k = prepare_for_scores(k, self.n_head, self.d_head)
-        v = prepare_for_scores(v, self.n_head, self.d_head)
+        if cross_kv is None:
+            k = prepare_for_scores(k, self.n_head, self.d_head)
+            v = prepare_for_scores(v, self.n_head, self.d_head)
 
         if mem_attention_mask is not None:
             if mem_attention_mask.dim() == 2:
@@ -258,7 +277,14 @@ class CrossAttention(nn.Module):
         )
         atten_output = recover_hidden_states(atten_output)
 
-        return model_config.AttentionOutput(atten_output=atten_output)
+        cross_key_value = None
+        if cache_return_config.return_cross_cache and cross_kv is None:
+            cross_key_value = model_config.KVCache(key=k, value=v)
+        
+        return model_config.AttentionOutput(
+            atten_output=atten_output,
+            cross_key_value=cross_key_value
+        )
 
 class SelfOutput(nn.Module):
     def __init__(
@@ -295,6 +321,8 @@ class Attention(nn.Module):
         mem_attention_mask: Optional[torch.BoolTensor]=None,
         attention_mask: Optional[torch.BoolTensor]=None,
         past_key_value: Optional[model_config.KVCache]=None,
+        cross_kv: Optional[model_config.KVCache]=None,
+        cross_kv_index: Optional[torch.LongTensor]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
         normed_hidden_states = self.norm(hidden_states)
@@ -302,7 +330,10 @@ class Attention(nn.Module):
             attention_outputs: model_config.AttentionOutput = self.attention(
                 hidden_states=normed_hidden_states,
                 mem_hidden_states=mem_hidden_states,
-                mem_attention_mask=mem_attention_mask
+                mem_attention_mask=mem_attention_mask,
+                cross_kv=cross_kv,
+                cross_kv_index=cross_kv_index,
+                cache_return_config=cache_return_config
             )
         elif isinstance(self.attention, SelfAttention):
             attention_outputs: model_config.AttentionOutput = self.attention(
@@ -318,7 +349,8 @@ class Attention(nn.Module):
 
         return model_config.AttentionOutput(
             atten_output=output,
-            past_key_value=attention_outputs.past_key_value
+            past_key_value=attention_outputs.past_key_value,
+            cross_key_value=attention_outputs.cross_key_value
         )
 
 class Intermediate(nn.Module):
@@ -521,9 +553,11 @@ class DecoderLayer(nn.Module):
         self,
         hidden_states: torch.FloatTensor,
         pos_emb: tuple[torch.FloatTensor, torch.FloatTensor],
-        mem_hidden_states: torch.FloatTensor,
-        mem_attention_mask: torch.BoolTensor,
+        mem_hidden_states: Optional[torch.FloatTensor]=None,
+        mem_attention_mask: Optional[torch.BoolTensor]=None,
         past_key_value: Optional[model_config.KVCache]=None,
+        cross_kv: Optional[model_config.KVCache]=None,
+        cross_kv_index: Optional[torch.LongTensor]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
         self_attention_outputs: model_config.AttentionOutput = self.self_attn(
@@ -536,13 +570,17 @@ class DecoderLayer(nn.Module):
         cross_attention_outputs: model_config.AttentionOutput = self.cross_attn(
             hidden_states=hidden_states,
             mem_hidden_states=mem_hidden_states,
-            mem_attention_mask=mem_attention_mask
+            mem_attention_mask=mem_attention_mask,
+            cross_kv=cross_kv,
+            cross_kv_index=cross_kv_index,
+            cache_return_config=cache_return_config
         )
         hidden_states = cross_attention_outputs.atten_output
         hidden_states = self.ffn(hidden_states)
         return model_config.LayerOutput(
             last_hidden_states=hidden_states,
-            past_key_value=self_attention_outputs.past_key_value
+            past_key_value=self_attention_outputs.past_key_value,
+            cross_key_value=cross_attention_outputs.cross_key_value
         )
 
 class Decoder(nn.Module):
@@ -573,34 +611,95 @@ class Decoder(nn.Module):
         self,
         hidden_states: torch.FloatTensor,
         pos_emb: tuple[torch.FloatTensor, torch.FloatTensor],
-        mem_hidden_states: torch.FloatTensor,
+        mem_hidden_states: Optional[torch.FloatTensor]=None,
         mem_attention_mask: Optional[torch.BoolTensor]=None,
         cache: Optional[model_config.Cache]=None,
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
-        key_values_cache = []
+        key_values_cache: list[model_config.KVCache] = []
+        cross_key_values_cache: list[model_config.KVCache] = []
         all_hidden_states = []
+
+        cross_kv_index = None
+        if cache is not None:
+            cross_kv_index = cache.cross_kv_index
+
+        has_self_cache = cache is not None and cache.kv_cache is not None
+        has_cross_cache = cache is not None and cache.cross_kv_cache is not None
         for idx, layer in enumerate(self.layers):
             layer_outputs: model_config.LayerOutput = layer(
                 hidden_states=hidden_states,
                 pos_emb=pos_emb,
                 mem_hidden_states=mem_hidden_states,
                 mem_attention_mask=mem_attention_mask,
-                past_key_value=cache.kv_cache[idx] if cache is not None else None,
+                past_key_value=cache.kv_cache[idx] if has_self_cache else None,
+                cross_kv=cache.cross_kv_cache[idx] if has_cross_cache else None,
+                cross_kv_index=cross_kv_index,
                 cache_return_config=cache_return_config
             )
             hidden_states = layer_outputs.last_hidden_states
-            if cache_return_config.return_cache:
+            if cache_return_config.return_self_cache and layer_outputs.past_key_value is not None:
                 key_values_cache.append(layer_outputs.past_key_value)
             
+            if cache_return_config.return_cross_cache and layer_outputs.cross_key_value is not None:
+                cross_key_values_cache.append(layer_outputs.cross_key_value)
+
             if cache_return_config.return_hidden_states:
                 all_hidden_states.append(hidden_states)
         
         hidden_states = self.norm(hidden_states)
+        
+        final_kv_cache = key_values_cache if key_values_cache else None
+        
+        if cache is None:
+            new_past_length = hidden_states.size(1)
+        elif cache.has_self_cache():
+            new_past_length = cache.past_length + hidden_states.size(1)
+        else:
+            # Self attention is recomputed over the whole prefix; only the
+            # single newly generated token extends the sequence length.
+            new_past_length = cache.past_length + 1
+        
+        prompt_hidden_states = cache.prompt_hidden_states if cache is not None else None
+
+        if has_cross_cache:
+            # Pass through the base cross KV and the index mapping for the
+            # rows that were processed in this forward pass.
+            if cross_kv_index is None:
+                cross_kv_index = torch.arange(
+                    cache.cross_kv_cache[0].key.size(0),
+                    device=cache.cross_kv_cache[0].key.device,
+                )
+            
+            cache_out = model_config.Cache(
+                kv_cache=final_kv_cache,
+                cross_kv_cache=cache.cross_kv_cache,
+                cross_kv_index=cross_kv_index,
+                past_length=new_past_length,
+                prompt_hidden_states=prompt_hidden_states,
+            )
+        
+        elif cross_key_values_cache:
+            # First forward: build the base cross KV cache and an identity index.
+            cache_out = model_config.Cache(
+                kv_cache=final_kv_cache,
+                cross_kv_cache=cross_key_values_cache,
+                cross_kv_index=torch.arange(
+                    cross_key_values_cache[0].key.size(0),
+                    device=cross_key_values_cache[0].key.device,
+                ),
+                past_length=new_past_length,
+                prompt_hidden_states=prompt_hidden_states,
+            )
+        else:
+            cache_out = model_config.Cache(
+                kv_cache=final_kv_cache,
+                past_length=new_past_length,
+                prompt_hidden_states=prompt_hidden_states,
+            )
+
         return model_config.Output(
             last_hidden_states=hidden_states,
             hidden_states=all_hidden_states if cache_return_config.return_hidden_states else None,
-            cache=model_config.Cache(
-                kv_cache=key_values_cache
-            ) if cache_return_config.return_cache else None
+            cache=cache_out
         )
