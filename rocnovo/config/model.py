@@ -21,16 +21,16 @@ class KVCache:
     def filter_by_mask(self, mask: torch.BoolTensor):
         return replace(
             self,
-            key=self.key[mask].clone(),
-            value=self.value[mask].clone()
+            key=self.key[mask],
+            value=self.value[mask]
         )
     
     def reorder(self, new_order: torch.Tensor):
         idx = new_order.to(self.key.device)
         return replace(
             self,
-            key=torch.index_select(self.key, 0, idx).clone(),
-            value=torch.index_select(self.value,0, idx).clone()
+            key=self.key[idx],
+            value=self.value[idx]
         )
 
 @dataclass(frozen=True)

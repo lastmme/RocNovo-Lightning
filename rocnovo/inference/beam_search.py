@@ -141,7 +141,7 @@ def _prepare_history_info(
     return History(
         tokens,
         scores,
-        mass_fits
+        mass_fits,
     )
 
 def _prepare_beamflag(
@@ -207,7 +207,7 @@ class BeamStat:
         )
         self.special_tokens = special_tokens
         self.device = device
-        
+
         # Per-beam mass-fit flag for the most recent quality-control step.
         # It is updated in _apply_quality_control and consumed in _write_history.
         self._mass_fits = torch.zeros(
@@ -232,6 +232,7 @@ class BeamStat:
         self.is_reverse = self.tokenizer.reverse if not is_reverse else (not self.tokenizer.reverse)
         self.current_step = 1
         self.cache = None
+        self._temp_active_cache = None
 
     @property
     def active(self):
@@ -248,12 +249,8 @@ class BeamStat:
         ))
         self._finished_step[newly_finished] = self.current_step
 
-    def _apply_quality_control(self):
+    def _apply_quality_control(self, tokens: torch.LongTensor):
         BS = self.size.batch_size * self.size.beam_size
-        tokens = einops.rearrange(
-            self.current.tokens,
-            "B S L -> (B S) L"
-        )
         current_step_tokens = tokens[:, self.current_step]
         self.flag.zero_()
 
@@ -339,16 +336,15 @@ class BeamStat:
         self.flag.discarded |= self.flag.finished & (peptide_length < self.size.min_len)
         self.flag.finished |= exceeds_mass
 
-    def _write_history(self):
-        tokens = einops.rearrange(
-            self.current.tokens,
-            "B S L -> (B S) L"
-        )
+    def _write_history(self, tokens: torch.LongTensor):
         written_idx = self.flag.finished & (~self.flag.discarded)
-        if not written_idx.any():
+        # Avoid a CPU-GPU sync from .any().item(); if nothing is written the
+        # subsequent indexing operations produce empty tensors and the writes
+        # are no-ops.
+        written_idx = written_idx.nonzero(as_tuple=True)[0]
+        if written_idx.numel() == 0:
             return
         
-        written_idx = written_idx.nonzero(as_tuple=True)[0]
         row = written_idx // self.size.beam_size
         col = written_idx % self.size.beam_size
         mean_scores = self.current.cumsum_scores[row, col] / self.current_step
@@ -392,8 +388,24 @@ class BeamStat:
         # mass-compliant candidate in history.  The fallback intentionally does
         # not enforce min_len, but it does require mass fit (and token validity,
         # which is already guaranteed for written history entries).
+
+        # To avoid overriding high-quality short predictions whose mass is
+        # slightly outside the strict beam-search tolerance (e.g. correct
+        # length-5 peptides), only trigger the fallback when the top candidate
+        # is itself poor (mean log-prob below a threshold).
         top_fits_mass = mass_fits[batch_idx, best_tokens_idx]
-        needs_fallback = ~top_fits_mass
+        # Recover mean log-prob from the stored score.
+        # mass-fit entries: score = exp(mean)
+        # non-mass-fit entries: score = exp(mean) - 1
+        eps = 1e-6
+        top_mean = torch.where(
+            top_fits_mass,
+            torch.log(best_scores.clamp_min(eps)),
+            torch.log((best_scores + 1.0).clamp_min(eps)),
+        )
+        # Never-written history slots have score -2.0; treat them as -inf mean.
+        top_mean = torch.where(best_scores > -1.9, top_mean, float("-inf"))
+        needs_fallback = ~top_fits_mass & (top_mean < -0.5)
         if not needs_fallback.any():
             return BestResult(best_tokens, best_scores)
 
@@ -459,7 +471,7 @@ class BeamStat:
                 final_tokens[empty_history] = selected_tokens
                 final_scores[empty_history] = selected_scores
         
-        return BestResult(best_tokens, best_scores)
+        return BestResult(final_tokens, final_scores)
 
     def _write_current(self):
         cumsum_scores = einops.repeat(
@@ -478,8 +490,9 @@ class BeamStat:
             k=self.size.beam_size,
             dim=-1
         )
-        row = topk_idx // self.size.vocab_size
-        col = topk_idx % self.size.vocab_size
+        # Single divmod call instead of separate // and %.
+        row = torch.div(topk_idx, self.size.vocab_size, rounding_mode="floor")
+        col = topk_idx - row * self.size.vocab_size
         row = einops.rearrange(
             row,
             "B S -> (B S)"
@@ -496,14 +509,23 @@ class BeamStat:
             S=self.size.beam_size
         )
         self.current.tokens[:, :, self.current_step] = col
-        self.current.cumsum_scores = topk_scores
 
         batch_is_active = self.flag.active.view(self.size.batch_size, self.size.beam_size).any(dim=1)
+        # Samples that have already terminated should keep their last beam scores
+        # so the final fallback returns a consistent score regardless of when
+        # other samples in the same batch finish.
+        self.current.cumsum_scores = torch.where(
+            batch_is_active[:, None],
+            topk_scores,
+            self.current.cumsum_scores,
+        )
+
         dead_batches = ~batch_is_active
-        if dead_batches.any():
-            self.current.tokens[dead_batches, :, self.current_step] = self.special_tokens.pad
+        # Avoid .any().item() sync; masked assignment is a no-op when the mask
+        # is all False.
+        self.current.tokens[dead_batches, :, self.current_step] = self.special_tokens.pad
         
-        if hasattr(self, '_temp_active_cache') and self._temp_active_cache is not None:
+        if self._temp_active_cache is not None:
             global_order = batch_idx * self.size.beam_size + row
             global_to_active_map = torch.clamp(torch.cumsum(self.flag.active.long(), dim=0) - 1, min=0)
             active_order = global_to_active_map[global_order]
@@ -520,8 +542,10 @@ class BeamStat:
         self._temp_active_cache = active_cache
 
         self._write_current()
-        self._apply_quality_control()
-        self._write_history()
+        # Rearrange once and reuse for quality control and history writing.
+        tokens = einops.rearrange(self.current.tokens, "B S L -> (B S) L")
+        self._apply_quality_control(tokens)
+        self._write_history(tokens)
         self._record_finished_steps()
         self.current_step += 1
 
@@ -547,12 +571,17 @@ class BeamStat:
 
         self.cache = cache.repeat_for_beam(self.size.beam_size)
 
-        self._apply_quality_control()
-        self._write_history()
-        self.flag.update()
+        tokens = einops.rearrange(self.current.tokens, "B S L -> (B S) L")
+        self._apply_quality_control(tokens)
+        self._write_history(tokens)
+        self._record_finished_steps()
         self.current_step += 1
 
     def get_next_input(self):
+        # Cache reordering is applied in _write_current, so self.cache is always
+        # in the current B*S logical order.  This method only prepares the input
+        # tokens.
+
         if self.cache is not None and not self.cache.has_self_cache():
             # Without self KV cache we must recompute self attention over the
             # full prefix generated so far. current_step has already been
@@ -561,13 +590,12 @@ class BeamStat:
                 self.current.tokens[:, :, :self.current_step],
                 "B S L -> (B S) L"
             )
-        
         else:
             tokens = einops.rearrange(
                 self.current.tokens[:, :, [self.current_step - 1]],
                 "B S L -> (B S) L"
             )
-        
+
         return tokens
 
 class BirdirectBeamStat:
@@ -701,7 +729,7 @@ def beam_search(
             input.fwd_cache,
             input.rev_cache,
             step_cache_config,
-            stat.fwd_stat.precursors[input.active]
+            stat.fwd_stat.precursors[input.active],
         )
         
         stat.update(

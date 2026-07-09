@@ -245,8 +245,8 @@ class CrossAttention(nn.Module):
         q = self.query(hidden_states)
         if cross_kv is not None:
             if cross_kv_index is not None:
-                k = torch.index_select(cross_kv.key, 0, cross_kv_index)
-                v = torch.index_select(cross_kv.value, 0, cross_kv_index)
+                k = cross_kv.key[cross_kv_index]
+                v = cross_kv.value[cross_kv_index]
             else:
                 k, v = cross_kv.key, cross_kv.value
         
