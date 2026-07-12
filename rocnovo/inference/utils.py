@@ -1,11 +1,14 @@
-from dataclasses import dataclass, fields, asdict
+from dataclasses import dataclass, fields, asdict, replace
 
-import numpy as np
 import torch
+import numpy as np
 
+from rocnovo.common.logger import logger
 from rocnovo.module.denovo import Denovo
-from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, ISOTOPE
+from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, ISOTOPE, SOS, SPECIAL_TOKENS
 from rocnovo.config.inference import DenovoResult, EvalResult, DenovoGlobalResult, EvalGlobalResult, ResolvedPrediction
+from rocnovo.config.data import Precursor, Spectra
+from rocnovo.config.model import OutputConfig, Cache
 
 @dataclass(frozen=True)
 class SpecialTokens:
@@ -174,72 +177,395 @@ def parse_device(device_input: int | str):
 
     return device
 
+def _make_dummy_spectra(batch_size: int, num_peaks: int, device: torch.device):
+    """Create deterministic dummy spectra for memory probing."""
+    mz = torch.linspace(100.0, 2000.0, num_peaks, device=device)[None, :].expand(
+        batch_size, -1
+    )
+    intensity = torch.rand(batch_size, num_peaks, device=device)
+    intensity = intensity / intensity.max(dim=1, keepdim=True).values.clamp_min(1e-6)
+    mask = torch.ones(batch_size, num_peaks, dtype=torch.bool, device=device)
+    precursor = Precursor(
+        mass=torch.full((batch_size,), 2000.0, device=device),
+        charge=torch.full((batch_size,), 2, dtype=torch.int32, device=device),
+        mz=torch.full((batch_size,), 1000.0, device=device),
+    )
+    return Spectra(mz=mz, intensity=intensity, mask=mask, precursor=precursor)
+
+def _measure_decode_peak_memory(
+    model: Denovo,
+    batch_size: int,
+    num_peaks: int,
+    max_length: int,
+    num_beams: int,
+    use_cross_cache: bool,
+    use_self_cache: bool,
+    gradscaler_enabled: bool,
+    device: torch.device,
+    max_decode_steps: int | None = None,
+) -> int:
+    """Run encode + prefill + decode steps and return peak allocated bytes.
+
+    By default this simulates the full decoding length (``max_length`` steps),
+    because the peak memory in autoregressive decoding occurs when the KV cache
+    has grown to its maximum length. Pass ``max_decode_steps`` to override the
+    number of decoding steps for faster but less accurate probes.
+    """
+    spectra = _make_dummy_spectra(batch_size, num_peaks, device)
+    actual_beam_size = max(1, num_beams)
+    decode_steps = max_length if max_decode_steps is None else max_decode_steps
+
+    torch.cuda.reset_peak_memory_stats(device)
+    with torch.no_grad(), torch.amp.autocast(
+        device_type="cuda", dtype=torch.bfloat16, enabled=gradscaler_enabled
+    ):
+        mem_hidden_states, mem_attention_mask = model.encode_spectrum(spectra)
+        prompt_hidden_states = model.prefill(spectra)
+
+        sos_token = SPECIAL_TOKENS[SOS]
+        tokens = torch.full(
+            (batch_size, 1), sos_token, dtype=torch.long, device=device
+        )
+        tokens_reverse = torch.full(
+            (batch_size, 1), sos_token, dtype=torch.long, device=device
+        )
+
+        init_output, init_output_reverse = model.peptide_decoder(
+            tokens,
+            tokens_reverse,
+            spectra.precursor,
+            mem_hidden_states,
+            mem_attention_mask,
+            prompt_hidden_states,
+            cache_return_config=OutputConfig(
+                return_cross_cache=use_cross_cache,
+                return_self_cache=use_self_cache,
+            ),
+        )
+
+        init_cache = init_output.cache
+        init_rev_cache = init_output_reverse.cache
+        
+        if init_cache is None:
+            init_cache = Cache(
+                past_length=tokens.size(1),
+                prompt_hidden_states=prompt_hidden_states,
+            )
+        
+        elif prompt_hidden_states is not None:
+            init_cache = replace(
+                init_cache,
+                prompt_hidden_states=prompt_hidden_states,
+            )
+        
+        if init_rev_cache is None:
+            init_rev_cache = Cache(
+                past_length=tokens.size(1),
+                prompt_hidden_states=prompt_hidden_states,
+            )
+        
+        elif prompt_hidden_states is not None:
+            init_rev_cache = replace(
+                init_rev_cache,
+                prompt_hidden_states=prompt_hidden_states,
+            )
+
+        if not use_cross_cache:
+            init_cache = init_cache.without_cross_cache()
+            init_rev_cache = init_rev_cache.without_cross_cache()
+        
+        if not use_self_cache:
+            init_cache = init_cache.without_self_cache()
+            init_rev_cache = init_rev_cache.without_self_cache()
+
+        beam_cache = init_cache.repeat_for_beam(actual_beam_size)
+        beam_rev_cache = init_rev_cache.repeat_for_beam(actual_beam_size)
+        beam_precursor = spectra.precursor.repeat_beamsize(actual_beam_size)
+
+        if num_beams >= 1:
+            step_tokens = torch.full(
+                (batch_size * actual_beam_size, 1),
+                sos_token,
+                dtype=torch.long,
+                device=device,
+            )
+            step_tokens_reverse = step_tokens.clone()
+            step_mask = torch.repeat_interleave(
+                mem_attention_mask, actual_beam_size, dim=0
+            )
+            if use_cross_cache:
+                step_mem_hidden = None
+            else:
+                step_mem_hidden = torch.repeat_interleave(
+                    mem_hidden_states, actual_beam_size, dim=0
+                )
+        else:
+            step_tokens = tokens
+            step_tokens_reverse = tokens_reverse
+            step_mask = mem_attention_mask
+            step_mem_hidden = mem_hidden_states
+
+        # Simulate the full decoding length so that the peak memory reflects the
+        # maximum KV cache size. Memory usage during generation is dominated by
+        # the cache growing with each step, so a single-step probe severely
+        # underestimates the true requirement.
+        full_tokens = step_tokens
+        full_tokens_reverse = step_tokens_reverse
+        for step_idx in range(decode_steps):
+            if use_self_cache:
+                model_input_tokens = step_tokens
+                model_input_tokens_reverse = step_tokens_reverse
+            else:
+                # Without self KV cache the decoder recomputes self attention
+                # over the whole prefix, so the input grows by one each step.
+                if step_idx == 0:
+                    full_tokens = step_tokens
+                    full_tokens_reverse = step_tokens_reverse
+                else:
+                    full_tokens = torch.cat([full_tokens, step_tokens], dim=1)
+                    full_tokens_reverse = torch.cat(
+                        [full_tokens_reverse, step_tokens_reverse], dim=1
+                    )
+                model_input_tokens = full_tokens
+                model_input_tokens_reverse = full_tokens_reverse
+
+            output, output_reverse = model.step(
+                model_input_tokens,
+                model_input_tokens_reverse,
+                step_mem_hidden,
+                step_mask,
+                beam_cache,
+                beam_rev_cache,
+                cache_return_config=OutputConfig(
+                    return_cross_cache=use_cross_cache,
+                    return_self_cache=use_self_cache,
+                ),
+                precursor=beam_precursor,
+            )
+            beam_cache = output.cache
+            beam_rev_cache = output_reverse.cache
+            # For memory estimation the exact next token does not matter; using
+            # argmax keeps the probe deterministic and avoids importing search
+            # logic into this utility.
+            next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            next_token_reverse = output_reverse.logits[:, -1, :].argmax(
+                dim=-1, keepdim=True
+            )
+            step_tokens = next_token
+            step_tokens_reverse = next_token_reverse
+
+    peak = torch.cuda.max_memory_allocated(device)
+    # Explicitly free the large probe tensors so they don't affect the next probe.
+    del spectra, mem_hidden_states, mem_attention_mask, prompt_hidden_states
+    del init_output, init_output_reverse, beam_cache, beam_rev_cache
+    torch.cuda.empty_cache()
+    return peak
+
+def _estimate_analytical_memory(
+    model: Denovo,
+    num_beams: int,
+    vocab_size: int,
+    max_length: int,
+    num_peaks: int,
+    use_cross_cache: bool,
+    use_self_cache: bool,
+    gradscaler_enabled: bool,
+    batch_size: int,
+) -> int:
+    """Return the dimensionally estimated peak memory (bytes) for a given batch size."""
+    n_byte = 2 if gradscaler_enabled else 4
+    S = max(1, num_beams)
+    P = num_peaks
+    L = max_length
+    B = batch_size
+
+    spectrum_cfg = model.model_config["spectrum"]
+    peptide_cfg = model.model_config["peptide"]
+    clip_cfg = model.clip.model_config["spectrum"]
+
+    H_s = spectrum_cfg["hidden_size"]
+    H_p = peptide_cfg["hidden_size"]
+    F_p = peptide_cfg["dim_feedforward"]
+    n_layers_p = peptide_cfg["n_layers"]
+    n_head_p = peptide_cfg["n_head"]
+    d_head_p = H_p // n_head_p
+    H_clip_s = clip_cfg["hidden_size"]
+    V = peptide_cfg.get("n_vocab", vocab_size)
+
+    # Persistent memory.
+    persistent = 0
+    persistent += 2 * B * (P + 1) * H_clip_s * n_byte
+    persistent += 2 * B * H_clip_s * n_byte
+    persistent += 2 * B * H_p * n_byte
+    persistent += 2 * B * (P + 1) * H_s * n_byte
+    if use_cross_cache:
+        # Cross KV cache is stored for every decoder layer and for both
+        # directions (forward + reverse). Each layer keeps K and V of shape
+        # [B, n_head, P+1, d_head] = B * (P+1) * H_s elements.
+        persistent += 4 * n_layers_p * B * (P + 1) * H_s * n_byte
+    
+    if use_self_cache:
+        # Self KV cache for both directions.
+        persistent += 4 * n_layers_p * B * S * L * H_p * n_byte
+
+    # Activation peak.
+    activation = 0
+    activation = max(activation, 4 * B * S * L * F_p * n_byte)
+    activation = max(activation, 2 * B * S * n_head_p * L * L * n_byte)
+    activation = max(activation, 2 * B * S * n_head_p * L * (P + 1) * n_byte)
+    if not use_cross_cache:
+        activation = max(
+            activation,
+            4 * B * S * n_head_p * (P + 1) * d_head_p * n_byte,
+        )
+
+    # Beam search buffers.
+    beam_buffer = 0
+    if S > 1:
+        per_direction = (
+            8 * B * S * L
+            + 4 * B * S * L * V
+            + 4 * B * S
+            + 8 * B * S * L * L
+            + 4 * B * S * L
+            + 4 * B * S
+        )
+        beam_buffer = 2 * per_direction
+
+    return persistent + activation + beam_buffer
+
 def estimate_analytical_batch_size(
     model: Denovo,
     num_beams: int,
     vocab_size: int,
     max_length: int,
-    num_peaks: int=300,
-    gradscaler_enabled: bool=True,
-    device: torch.device = torch.device("cuda:0")
-):
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    
-    n_byte = 2 if gradscaler_enabled else 4
-    actual_beam_size = max(1, num_beams)
+    num_peaks: int = 300,
+    gradscaler_enabled: bool = True,
+    device: torch.device = torch.device("cuda:0"),
+    use_cross_cache: bool = True,
+    use_self_cache: bool = True,
+    static_overhead_gb: float = 1.5,
+    safety_margin: float = 0.10,
+    validation_safety_factor: float = 0.85,
+    oom_reduction_factor: float = 0.9,
+    alignment: int = 8,
+) -> int:
+    if device.type != "cuda":
+        return 64
+
+    torch.cuda.empty_cache()
     free_vram, _ = torch.cuda.mem_get_info(device)
-    
-    static_overhead = 1.5 * (1024**3)
-    usable_vram = max(0, free_vram - static_overhead)
-    target_vram = usable_vram * 0.95
-    
-    encoder_hidden_size = model.model_config["spectrum"]["hidden_size"]
-    encoder_ffn_dim = model.model_config["spectrum"]["dim_feedforward"]
-    encoder_heads = model.model_config["spectrum"]["n_head"]
-    
-    decoder_hidden_size = model.model_config["peptide"]["hidden_size"]
-    decoder_ffn_dim = model.model_config["peptide"]["dim_feedforward"]
-    decoder_num_layers = len(model.peptide_decoder.decoder.layers)
-    
-    mem_states_bytes = actual_beam_size * num_peaks * (encoder_hidden_size * n_byte)
-    kvcache_bytes = 2 * actual_beam_size * decoder_num_layers * 2 * max_length * (decoder_hidden_size * n_byte)
-    decoder_activation_peak = actual_beam_size * decoder_ffn_dim * n_byte
 
-    if num_beams >= 1:
-        kvcache_bytes *= 2
-    
-    persistent_memory = mem_states_bytes + kvcache_bytes + decoder_activation_peak
-    attn_matrix_bytes = encoder_heads * ((num_peaks + 1) ** 2) * 4
-    ffn_bytes = (num_peaks + 1) * encoder_ffn_dim * n_byte
-    
-    single_encoder_peak = attn_matrix_bytes + ffn_bytes
-    activation_peak = single_encoder_peak * 1.5
+    static_overhead = static_overhead_gb * (1024 ** 3)
+    target_vram = max(0, free_vram - static_overhead) * (1.0 - safety_margin)
 
-    bidirectional_beam_buffer = 0
-    if num_beams >= 1:
-        S = actual_beam_size
-        L = max_length + 2
-        V = vocab_size
+    logger.debug(
+        f"Estimating batch size: free_vram={free_vram/1e9:.2f}GB, "
+        f"target_vram={target_vram/1e9:.2f}GB, num_beams={num_beams}, "
+        f"use_cross_cache={use_cross_cache}, use_self_cache={use_self_cache}"
+    )
 
-        bytes_cur_tokens = S * L * 8             # [B, S, L] int64
-        bytes_cur_scores = S * L * V * 4         # [B, S, L, V] float32
-        bytes_cur_cumsum = S * 4                 # [B, S] float32
+    # Calibrate the analytical formula with two small probes (batch sizes 2 and 4).
+    # The formula captures the per-batch scaling of persistent buffers and dominant
+    # activations, but misses fixed costs and some super-linear effects. Fitting a
+    # line through two measured points yields a more reliable slope than a single
+    # point, where fixed overhead would dominate.
+    calibration_batches = (2, 4)
+    measured_peaks = []
+    for calibration_batch in calibration_batches:
+        try:
+            peak = _measure_decode_peak_memory(
+                model,
+                batch_size=calibration_batch,
+                num_peaks=num_peaks,
+                max_length=max_length,
+                num_beams=num_beams,
+                use_cross_cache=use_cross_cache,
+                use_self_cache=use_self_cache,
+                gradscaler_enabled=gradscaler_enabled,
+                device=device,
+            )
+        except RuntimeError as e:
+            logger.warning(
+                f"Calibration probe (batch={calibration_batch}) OOMed: {e}. "
+                "Falling back to batch size 1."
+            )
+            return 1
 
-        bytes_his_tokens = S * L * L * 8         # [B, S, L, L] int64
-        bytes_his_scores = S * L * 4             # [B, S, L] float32
+        measured_peaks.append(peak)
 
-        bytes_flags = S * 4 * 1                  # 4 * [B * S] bool
-
-        single_dir_buffer_bytes = (
-            bytes_cur_tokens + bytes_cur_scores + bytes_cur_cumsum + 
-            bytes_his_tokens + bytes_his_scores + bytes_flags
+    analytical_peaks = [
+        _estimate_analytical_memory(
+            model,
+            num_beams,
+            vocab_size,
+            max_length,
+            num_peaks,
+            use_cross_cache,
+            use_self_cache,
+            gradscaler_enabled,
+            b,
         )
-        
-        bidirectional_beam_buffer = single_dir_buffer_bytes * 2
+        for b in calibration_batches
+    ]
 
-    total_bytes_per_batch = persistent_memory + activation_peak + bidirectional_beam_buffer
-    memory_per_batch_with_margin = total_bytes_per_batch * 1.15
-    max_batch_size = int(target_vram // memory_per_batch_with_margin)
-    max_batch_size = (max_batch_size // 8) * 8
-    return max(1, max_batch_size)
+    # Fit measured_peak = fixed + slope * batch_size to the two probes.
+    measured_slope = (
+        measured_peaks[1] - measured_peaks[0]
+    ) / (calibration_batches[1] - calibration_batches[0])
+    analytical_slope = (
+        analytical_peaks[1] - analytical_peaks[0]
+    ) / (calibration_batches[1] - calibration_batches[0])
+    # The analytical slope is usually too small because it misses per-step
+    # activation growth. Use the measured slope directly; it already reflects the
+    # true per-batch memory cost at small scale.
+    slope_per_batch = max(measured_slope, analytical_slope)
+    fixed_overhead = max(0, measured_peaks[0] - slope_per_batch * calibration_batches[0])
+
+    logger.debug(
+        f"Calibration: measured_slope={measured_slope/1e6:.3f}MB/batch, "
+        f"analytical_slope={analytical_slope/1e6:.3f}MB/batch, "
+        f"fixed_overhead={fixed_overhead/1e9:.3f}GB"
+    )
+
+    if slope_per_batch <= 0:
+        logger.warning("Non-positive slope; using conservative default.")
+        candidate = alignment
+    else:
+        candidate = int(
+            (target_vram * validation_safety_factor - fixed_overhead) / slope_per_batch
+        )
+    
+    candidate = max(1, (candidate // alignment) * alignment)
+    logger.debug(f"Calibrated estimate before validation: {candidate}")
+
+    # Validate with synthetic extreme data: 300 peaks and full max_length decode.
+    # The probe must run the complete decoding length so that the KV cache reaches
+    # its maximum size; this is the worst-case memory scenario.
+    while candidate >= 1:
+        try:
+            peak = _measure_decode_peak_memory(
+                model,
+                batch_size=candidate,
+                num_peaks=num_peaks,
+                max_length=max_length,
+                num_beams=num_beams,
+                use_cross_cache=use_cross_cache,
+                use_self_cache=use_self_cache,
+                gradscaler_enabled=gradscaler_enabled,
+                device=device,
+            )
+            logger.debug(
+                f"Validated batch size {candidate}: peak={peak/1e9:.3f}GB"
+            )
+            return candidate
+        
+        except RuntimeError as e:
+            logger.warning(
+                f"Validation OOM for batch size {candidate}: {e}. "
+                f"Reducing by {oom_reduction_factor:.2f} and retrying."
+            )
+            candidate = int(candidate * oom_reduction_factor)
+            candidate = max(1, (candidate // alignment) * alignment)
+
+    return 1

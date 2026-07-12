@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import time
 from pathlib import Path
 from typing import Literal
@@ -10,8 +13,10 @@ from tqdm import tqdm
 
 from rocnovo.common.io import load_yaml, normalize_path
 from rocnovo.common.logger import logger
+from rocnovo.config.model import OutputConfig, Cache
 from rocnovo.config.model import OutputConfig
 import rocnovo.config.tokenizer as tokenizer_config
+from rocnovo.common.utils import load_denovo_from_checkpoint
 from rocnovo.config.data import DataConfig, BidirectTrainBatch, InferenceBatch
 from rocnovo.config.inference import InferenceConfig, DenovoResult, EvalResult
 from rocnovo.inference.beam_search import beam_search
@@ -20,7 +25,6 @@ from rocnovo.inference.utils import (
     post_process,
     _prepare_token_metadata,
     SpecialTokens,
-    load_denovo_from_checkpoint,
     parse_device,
     estimate_analytical_batch_size
 )
@@ -79,13 +83,49 @@ def generation(
                 mem_attention_mask,
                 prompt_hidden_states,
                 cache_return_config=OutputConfig(
-                    return_cache=True
+                    return_cross_cache=inference_config.use_cross_cache,
+                    return_self_cache=inference_config.use_self_cache,
                 )
             )
             
             init_log_probs = F.log_softmax(init_output.logits[:, -1, :], dim=-1)
             init_rev_log_probs = F.log_softmax(init_output_reverse.logits[:, -1, :], dim=-1)
             
+            init_cache = init_output.cache
+            init_rev_cache = init_output_reverse.cache
+            # If no cache was requested from the prefill call, create a minimal
+            # cache that only tracks the current sequence length for position
+            # encoding in subsequent decoding steps.
+            if init_cache is None:
+                init_cache = Cache(
+                    past_length=tokens.size(1),
+                    prompt_hidden_states=prompt_hidden_states,
+                )
+            elif prompt_hidden_states is not None:
+                init_cache = replace(
+                    init_cache,
+                    prompt_hidden_states=prompt_hidden_states,
+                )
+
+            if init_rev_cache is None:
+                init_rev_cache = Cache(
+                    past_length=tokens.size(1),
+                    prompt_hidden_states=prompt_hidden_states,
+                )
+            elif prompt_hidden_states is not None:
+                init_rev_cache = replace(
+                    init_rev_cache,
+                    prompt_hidden_states=prompt_hidden_states,
+                )
+
+            if not inference_config.use_cross_cache:
+                init_cache = init_cache.without_cross_cache()
+                init_rev_cache = init_rev_cache.without_cross_cache()
+            
+            if not inference_config.use_self_cache:
+                init_cache = init_cache.without_self_cache()
+                init_rev_cache = init_rev_cache.without_self_cache()
+
             if inference_config.num_beams == 0:
                 searched_result = greedy_search(
                     model,
@@ -95,8 +135,8 @@ def generation(
                     mem_attention_mask,
                     init_log_probs,
                     init_rev_log_probs,
-                    init_output.cache,
-                    init_output_reverse.cache,
+                    init_cache,
+                    init_rev_cache,
                     peptide_tokenizer,
                     inference_config
                 )
@@ -108,8 +148,8 @@ def generation(
                     mem_attention_mask,
                     init_log_probs,
                     init_rev_log_probs,
-                    init_output.cache,
-                    init_output_reverse.cache,
+                    init_cache,
+                    init_rev_cache,
                     peptide_tokenizer,
                     inference_config
                 )
@@ -171,7 +211,9 @@ def predict(config: str | Path | dict):
         inference_config.max_len + 1,
         config["tokenizer"]["spectrum"]["n_top_peaks"],
         inference_config.gradscaling_enabled,
-        device
+        device,
+        inference_config.use_cross_cache,
+        inference_config.use_self_cache,
     )
     logger.debug(f"num_beams >= 1 means number of beams in beam search, 0 means greedy search")
     logger.debug(f"Estimated prediction batch size: {estimated_batch_size} with num_beams: {inference_config.num_beams}")

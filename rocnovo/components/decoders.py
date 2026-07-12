@@ -1,4 +1,5 @@
 from typing import Optional, Literal
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ from rocnovo.components.transformers import WordEmbedding, PeakRotaryPositionalE
 from rocnovo.components.encoders import PositionalEncoder
 from rocnovo.tokenizer.peptide import CANONICAL, SPECIAL_TOKENS, PAD
 import rocnovo.config.model as model_config
+import rocnovo.config.data as data_config
 from rocnovo.config.data import Precursor
 
 class ClipPeptideDecoder(nn.Module):
@@ -120,13 +122,41 @@ class BiDirectRopeDecoder(nn.Module):
         mem_attention_mask: Optional[torch.BoolTensor]=None,
         cache: Optional[model_config.Cache]=None,
         cache_reverse: Optional[model_config.Cache]=None,
-        cache_return_config: model_config.OutputConfig=model_config.default_output_config
+        cache_return_config: model_config.OutputConfig=model_config.default_output_config,
+        precursor: Optional[data_config.Precursor]=None,
     ):
-        hidden_states: torch.FloatTensor = self.word_embedding.embed(tokens)
-        hidden_states_reverse = self.word_embedding.embed(tokens_reverse)
+        use_full_prefix = cache is not None and not cache.has_self_cache()
+        if use_full_prefix and cache.prompt_hidden_states is not None:
+            hidden_states = self.word_embedding(
+                tokens,
+                precursor,
+                cache.prompt_hidden_states,
+            )
+        else:
+            hidden_states: torch.FloatTensor = self.word_embedding.embed(tokens)
+        
+        use_full_prefix_reverse = cache_reverse is not None and not cache_reverse.has_self_cache()
+        if use_full_prefix_reverse and cache_reverse.prompt_hidden_states is not None:
+            hidden_states_reverse = self.word_embedding(
+                tokens_reverse,
+                precursor,
+                cache_reverse.prompt_hidden_states,
+            )
+        else:
+            hidden_states_reverse = self.word_embedding.embed(tokens_reverse)
+        
         start_pos = 0
         if cache is not None:
-            start_pos = cache.kv_cache[0].key.shape[-2]
+            use_full_prefix = not cache.has_self_cache()
+            prepends_prompt = (
+                use_full_prefix
+                and cache.prompt_hidden_states is not None
+            )
+            n_prompt = (
+                cache.prompt_hidden_states.size(1)
+                if prepends_prompt else 0
+            )
+            start_pos = cache.past_length - tokens.size(1) + 1 - n_prompt
         
         pos_emb = self.calculate_pos_emb(
             start_pos,
@@ -219,17 +249,38 @@ class BiDirectRopeDecoder(nn.Module):
             if prompt_hidden_states.dim() == 2:
                 n_skip = 1
         
+        if prompt_hidden_states is not None:
+            cache = replace(
+                output.cache,
+                prompt_hidden_states=prompt_hidden_states,
+            ) if output.cache is not None else model_config.Cache(
+                prompt_hidden_states=prompt_hidden_states,
+                past_length=output.last_hidden_states.size(1),
+            )
+
+            cache_reverse = replace(
+                output_reverse.cache,
+                prompt_hidden_states=prompt_hidden_states,
+            ) if output_reverse.cache is not None else model_config.Cache(
+                prompt_hidden_states=prompt_hidden_states,
+                past_length=output_reverse.last_hidden_states.size(1),
+            )
+        
+        else:
+            cache = output.cache
+            cache_reverse = output_reverse.cache
+        
         return (
             model_config.DecoderOutput(
                 output.last_hidden_states,
                 output.hidden_states,
-                output.cache,
+                cache,
                 logits[:, n_skip:, :],
             ),
             model_config.DecoderOutput(
                 output_reverse.last_hidden_states,
                 output_reverse.hidden_states,
-                output_reverse.cache,
+                cache_reverse,
                 logits_reverse[:, n_skip:, :],
             )
         )

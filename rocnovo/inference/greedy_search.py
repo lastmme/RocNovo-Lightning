@@ -84,11 +84,23 @@ def greedy_search(
             next_token_rev = next_token_rev[still_active]
             mem_hidden_states = mem_hidden_states[still_active]
             mem_attention_mask = mem_attention_mask[still_active]
+            precursor = precursor.filter_by_mask(still_active)
             cache = cache.filter_by_mask(still_active)
             cache_reverse = cache_reverse.filter_by_mask(still_active)
 
-        curr_tokens = next_token.unsqueeze(-1)
-        curr_tokens_rev = next_token_rev.unsqueeze(-1)
+        step_cache_config = OutputConfig(
+            return_cross_cache=cache.has_cross_cache(),
+            return_self_cache=cache.has_self_cache(),
+        )
+        if cache.has_self_cache():
+            curr_tokens = next_token.unsqueeze(-1)
+            curr_tokens_rev = next_token_rev.unsqueeze(-1)
+        else:
+            # Without self KV cache we must recompute self attention over the
+            # full prefix generated so far.
+            curr_tokens = all_tokens[active_idx, :current_step + 1]
+            curr_tokens_rev = all_tokens_reverse[active_idx, :current_step + 1]
+        
         output, output_reverse = model.step(
             curr_tokens,
             curr_tokens_rev,
@@ -96,9 +108,8 @@ def greedy_search(
             mem_attention_mask,
             cache,
             cache_reverse,
-            OutputConfig(
-                return_cache=True
-            )
+            step_cache_config,
+            precursor
         )
         cache = output.cache
         cache_reverse = output_reverse.cache

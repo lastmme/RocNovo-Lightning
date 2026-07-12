@@ -12,6 +12,8 @@ class InferenceConfig:
     max_isotope: int=1
     mass_tolerance: float=50.0
     gradscaling_enabled: bool=True
+    use_cross_cache: bool=True
+    use_self_cache: bool=True
 
 @dataclass(frozen=True)
 class RawSearchResult:
