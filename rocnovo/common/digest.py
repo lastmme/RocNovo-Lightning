@@ -273,7 +273,10 @@ def process_peptide_batch(
                 modified_peptide = swap_regex.sub(lambda x: swap_map[x.group()], isoform)
             else:
                 modified_peptide = isoform
-                
+
+            if len(modified_peptide) == 0:
+                continue
+            
             seq_mass = tokenizer.cal_seq_mass(modified_peptide)
             if bucket_config.min_mass > seq_mass or seq_mass > bucket_config.max_mass:
                 continue
@@ -317,10 +320,11 @@ def write_digested_peptides(
     temp_sort_dir = output_dir.joinpath("tmp_parallel_chunks")
     if final_output_file.exists() and not overwrite:
         logger.info(f"The peptides table is already stored.")
-        schema_metadata = h5py.File(final_output_file).attrs
-        logging_buffer = ["Bucket information is"]
-        for key, value in schema_metadata.items():
-            logging_buffer.append(f" {key}: {value}")
+        with h5py.File(final_output_file, "r") as f:
+            schema_metadata = f.attrs
+            logging_buffer = ["Bucket information is"]
+            for key, value in schema_metadata.items():
+                logging_buffer.append(f" {key}: {value}")
         
         logger.info(f"{''.join(logging_buffer)}")
         return final_output_file
@@ -381,11 +385,11 @@ def write_digested_peptides(
                 futures.append(f)
                 future2path[f] = chunk_path
         
-        for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Waiting for tasks", disable=not progress_bar, dynamic_ncols=True)):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Waiting for tasks", disable=not progress_bar, dynamic_ncols=True):
             rows = future.result()
             if rows > 0:
                 total_rows += rows
-                chunk_files.append(future2path[f])
+                chunk_files.append(future2path[future])
         
         logger.info(f"Total skipped peptides: {total_skipped_count}")
 

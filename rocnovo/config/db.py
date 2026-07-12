@@ -65,6 +65,9 @@ class DecoyConfig:
 @dataclass(frozen=True)
 class ExecutionConfig:
     topk: int=10
+    use_clip: bool=True
+    clip_spectra_batch_size: int=256
+    clip_embed_in_memory: bool=False
     n_workers: int=field(default_factory=lambda: max(1, os.cpu_count() - 2))
     worker_batch_size: int=5_000
     sort_buffer_size: int=10_000
@@ -75,6 +78,12 @@ class ExecutionConfig:
     def __post_init__(self):
         if self.topk <= 0:
             raise ValueError(f"topk should be larger than 0, current value: {self.topk}")
+        
+        if self.clip_spectra_batch_size <= 0:
+            raise ValueError(f"clip_spectra_batch_size should be larger than 0, current value: {self.clip_spectra_batch_size}")
+
+        if self.clip_embed_in_memory not in (True, False):
+            raise ValueError(f"clip_embed_in_memory must be bool, current value: {self.clip_embed_in_memory}")
         
         if self.n_workers < 0:
             raise ValueError(f"n_workers: {self.n_workers}")

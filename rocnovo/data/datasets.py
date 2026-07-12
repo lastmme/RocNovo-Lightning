@@ -97,37 +97,6 @@ class BiDirectDeNovoStream(SpectrumStream):
         peptide_tokens_reverse = self.peptide_tokenizer.reverse_tokenize(peptide)
         return spectrum, precursor_mz, precursor_charge, peptide_tokens, peptide_tokens_reverse
 
-class PeptideMetadataStream(Dataset):
-    def __init__(self, peptide_metadata_file: str | Path):
-        super().__init__()
-        self.peptide_metadata_file = peptide_metadata_file
-        self._h5_file = None 
-        with h5py.File(peptide_metadata_file, 'r') as f:
-            self.length = f['mass'].shape[0]
-
-    def _get_file(self):
-        if self._h5_file is None:
-            self._h5_file = h5py.File(self.peptide_metadata_file, 'r')
-        return self._h5_file
-
-    def __len__(self):
-        return self.length
-    
-    def __getitem__(self, idx: int):
-        h5f = self._get_file()
-        return {
-            "id": idx + 1,
-            "mass": h5f['mass'][idx],
-            "modified_peptide": h5f['modified_peptide'][idx].decode(),
-            "peptide": h5f['peptide'][idx].decode(),
-            "protein_id": h5f['protein_id'][idx],
-            "is_decoy": h5f['is_decoy'][idx]
-        }
-
-    def __del__(self):
-        if self._h5_file is not None:
-            self._h5_file.close()
-
 class DBSearchDataset(Dataset):
     def __init__(
         self,

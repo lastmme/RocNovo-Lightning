@@ -9,7 +9,7 @@ from pytorch_lightning import LightningDataModule
 
 from rocnovo.common.io import normalize_path
 from rocnovo.config.data import BidirectTrainBatch, TrainBatch, InferenceBatch, Spectra, Peptide, Precursor, DataConfig, DBSearchBatch
-from rocnovo.data.datasets import DeNovoStream, SpectrumStream, BiDirectDeNovoStream, PeptideMetadataStream, DBSearchDataset
+from rocnovo.data.datasets import DeNovoStream, SpectrumStream, BiDirectDeNovoStream, DBSearchDataset
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, SPECIAL_TOKENS, PAD, PROTON
 
