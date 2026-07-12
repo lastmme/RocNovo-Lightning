@@ -14,8 +14,8 @@ class KVCache:
     def repeat_for_beam(self, beam_size: int):
         return replace(
             self,
-            key=self.key.repeat_interleave(beam_size, dim=0).clone(),
-            value=self.value.repeat_interleave(beam_size, dim=0).clone()
+            key=self.key.repeat_interleave(beam_size, dim=0),
+            value=self.value.repeat_interleave(beam_size, dim=0),
         )
     
     def filter_by_mask(self, mask: torch.BoolTensor):
@@ -179,6 +179,6 @@ class Output:
 
 @dataclass(frozen=True)
 class DecoderOutput(Output):
-    logits: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor]=None
 
 default_output_config = OutputConfig()

@@ -1,10 +1,8 @@
-import copy
 from dataclasses import dataclass, fields, asdict, replace
 
-import numpy as np
 import torch
+import numpy as np
 
-from rocnovo.common.io import normalize_path
 from rocnovo.common.logger import logger
 from rocnovo.module.denovo import Denovo
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, ISOTOPE, SOS, SPECIAL_TOKENS
@@ -571,24 +569,3 @@ def estimate_analytical_batch_size(
             candidate = max(1, (candidate // alignment) * alignment)
 
     return 1
-
-def load_denovo_from_checkpoint(
-    ckpt_path: str,
-    inference_config_overrides: dict,
-    device: torch.device
-) -> "Denovo":
-    ckpt_path = normalize_path(ckpt_path)
-    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    if "hyper_parameters" in checkpoint:
-        original_config = checkpoint["hyper_parameters"]
-    else:
-        raise KeyError("Could not find 'config' in the checkpoint hyper_parameters.")
-    
-    merged_config = _deep_merge_dicts(original_config, inference_config_overrides)
-    model = Denovo.load_from_checkpoint(
-        ckpt_path,
-        map_location="cpu",
-        config=merged_config
-    )
-    
-    return model.to(device).eval(), merged_config

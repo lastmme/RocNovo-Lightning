@@ -16,6 +16,7 @@ from rocnovo.common.logger import logger
 from rocnovo.config.model import OutputConfig, Cache
 from rocnovo.config.model import OutputConfig
 import rocnovo.config.tokenizer as tokenizer_config
+from rocnovo.common.utils import load_denovo_from_checkpoint
 from rocnovo.config.data import DataConfig, BidirectTrainBatch, InferenceBatch
 from rocnovo.config.inference import InferenceConfig, DenovoResult, EvalResult
 from rocnovo.inference.beam_search import beam_search
@@ -24,7 +25,6 @@ from rocnovo.inference.utils import (
     post_process,
     _prepare_token_metadata,
     SpecialTokens,
-    load_denovo_from_checkpoint,
     parse_device,
     estimate_analytical_batch_size
 )
