@@ -189,7 +189,6 @@ def train(config_path: str):
     peptide_tokenizer_config = tokenizer_config.PTMTokenizerConfig(**config["tokenizer"]["peptide"])
     
     aug_config = AugmentationConfig(**config["aug"])
-    aug_config.return_dummy_tensor = False
     spectrum_tokenizer = SpectrumTokenizer(**asdict(spectrum_tokenizer_config))
     if aug_config.enabled:
         spectrum_tokenizer.set_aug_config(aug_config)
