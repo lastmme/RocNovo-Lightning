@@ -7,4 +7,3 @@ class AugmentationConfig:
     removal_rate: float=0.2
     removal_intensity_threshold: float=0.3
     perturbation_rate: float=0.15
-    return_dummy_tensor: bool=True
