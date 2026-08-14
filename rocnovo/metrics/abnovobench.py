@@ -74,7 +74,7 @@ def aa_match(
 def aa_match_batch(
     gts: Iterable[str], preds: Iterable[str], aa_dict: dict[str,float],
     ptm_list: list[str], cum_thresh: float, ind_thresh: float, mode: str
-) -> tuple[list[tuple[np.ndarray,bool,np.ndarray,np.ndarray]], int, int, int, int, int]:
+) -> tuple[list[tuple[np.ndarray,bool,np.ndarray,np.ndarray]], int, int, int, int, int, int]:
     """
     Batch comparison of ground-truth and predicted peptide lists.
 
@@ -85,15 +85,20 @@ def aa_match_batch(
     - total predicted AA count
     - total true PTM count
     - total predicted PTM count
+    - number of non-empty predicted peptides
     """
     batch = []
     n_pep = len(list(gts))
     n_aa_true = sum(len(split_peptide(x)) for x in gts)
     n_aa_pred = 0
     n_ptm_true = n_ptm_pred = 0
+    n_pep_pred_non_empty = 0
     for gt, pr in tqdm(zip(gts, preds), total=len(gts)):
         seq_gt = split_peptide(gt)
-        seq_pr = split_peptide(pr) if isinstance(pr, str) else []
+        if isinstance(pr, str) and pr.strip() and pr.strip().lower() != "nan":
+            seq_pr = split_peptide(pr)
+        else:
+            seq_pr = []
         n_aa_pred += len(seq_pr)
         n_ptm_true += sum(aa in ptm_list for aa in seq_gt)
         n_ptm_pred += sum(aa in ptm_list for aa in seq_pr)
@@ -101,13 +106,15 @@ def aa_match_batch(
             batch.append((np.zeros(len(seq_gt), bool), False,
                           np.zeros(len(seq_gt), bool), np.zeros(len(seq_gt), bool)))
         else:
+            n_pep_pred_non_empty += 1
             batch.append(aa_match(seq_gt, seq_pr, aa_dict, ptm_list, cum_thresh, ind_thresh, mode))
-    return batch, n_pep, n_aa_true, n_aa_pred, n_ptm_true, n_ptm_pred
+    return batch, n_pep, n_aa_true, n_aa_pred, n_ptm_true, n_ptm_pred, n_pep_pred_non_empty
 
 def aa_match_metrics(
     batch: list[tuple[np.ndarray,bool,np.ndarray,np.ndarray]],
     n_pep_true: int, n_aa_true: int, n_aa_pred: int,
-    n_ptm_true: int, n_ptm_pred: int, scores: list[float]
+    n_ptm_true: int, n_ptm_pred: int, n_pep_pred_non_empty: int,
+    scores: list[float]
 ) -> dict[str, float]:
     """
     Compute evaluation metrics:
@@ -122,7 +129,7 @@ def aa_match_metrics(
     aa_recall = n_aa_corr / (n_aa_true + 1e-8)
     # Peptide
     n_pep_corr = sum(m[1] for m in batch)
-    pep_precision = n_pep_corr / (len(batch) + 1e-8)
+    pep_precision = n_pep_corr / (n_pep_pred_non_empty + 1e-8)
     pep_recall = n_pep_corr / (n_pep_true + 1e-8)
     # PTM
     ptm_recall = sum(m[2].sum() for m in batch) / (n_ptm_true + 1e-8)

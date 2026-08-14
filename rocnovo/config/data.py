@@ -3,6 +3,26 @@ from dataclasses import dataclass, replace
 import torch
 import einops
 
+@dataclass
+class SpectrumItem:
+    spectrum: torch.Tensor
+    precursor_mz: float
+    precursor_charge: int
+    scan_id: str
+
+@dataclass
+class DeNovoItem(SpectrumItem):
+    peptide_tokens: torch.LongTensor
+
+@dataclass
+class BiDirectDeNovoItem(SpectrumItem):
+    peptide_tokens: torch.LongTensor
+    peptide_tokens_reverse: torch.LongTensor
+
+@dataclass
+class DBSearchItem(BiDirectDeNovoItem):
+    real_spectrum_idx: int
+
 @dataclass(frozen=True)
 class DataConfig:
     train_path: str=""
@@ -94,6 +114,7 @@ class TrainBatch:
 @dataclass(frozen=True)
 class BidirectTrainBatch(TrainBatch):
     peptide_reverse: Peptide
+    scan_id: list[str] | None = None
 
     def to(self, device: torch.device):
         return replace(
@@ -104,8 +125,10 @@ class BidirectTrainBatch(TrainBatch):
         )
 
 @dataclass(frozen=True)
-class DBSearchBatch(BidirectTrainBatch):
+class DBSearchBatch(TrainBatch):
+    peptide_reverse: Peptide
     spectrum_id: torch.LongTensor
+    scan_id: list[str] | None = None
 
     def to(self, device: torch.device):
         return replace(
@@ -115,9 +138,11 @@ class DBSearchBatch(BidirectTrainBatch):
             peptide_reverse=self.peptide_reverse.to(device),
             spectrum_id=self.spectrum_id.to(device)
         )
+
 @dataclass(frozen=True)
 class InferenceBatch:
     spectra: Spectra
+    scan_id: list[str] | None = None
 
     def to(self, device: torch.device):
         return replace(
