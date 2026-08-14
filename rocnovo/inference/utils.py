@@ -6,9 +6,10 @@ import numpy as np
 from rocnovo.common.logger import logger
 from rocnovo.module.denovo import Denovo
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, ISOTOPE, SOS, SPECIAL_TOKENS
-from rocnovo.config.inference import DenovoResult, EvalResult, DenovoGlobalResult, EvalGlobalResult, ResolvedPrediction
+from rocnovo.config.inference import DenovoResult, EvalResult, ResolvedPrediction
 from rocnovo.config.data import Precursor, Spectra
 from rocnovo.config.model import OutputConfig, Cache
+from rocnovo.metrics.abnovobench import aa_match_batch, aa_match_metrics
 
 @dataclass(frozen=True)
 class SpecialTokens:
@@ -112,41 +113,6 @@ def merge_batches(batches: list[DenovoResult | EvalResult]):
             raise TypeError(f"Unsupported field type for merging: {type(values[0])}")
     
     return batch_type(**merged_args)
-
-def post_process(batches: list[DenovoResult | EvalResult]):
-    if not batches:
-        raise ValueError("The batch list is empty.")
-    
-    merged_raw_batch = merge_batches(batches)
-    resolved_preds = resolve_bidirectional_predictions(merged_raw_batch)
-
-    if isinstance(merged_raw_batch, EvalResult):
-        return EvalGlobalResult(
-            resolved_preds.pred_mz,
-            resolved_preds.pred_peptide,
-            resolved_preds.pred_score,
-            resolved_preds.direction,
-            merged_raw_batch.fwd_score,
-            merged_raw_batch.fwd_peptide,
-            merged_raw_batch.rev_score,
-            merged_raw_batch.rev_peptide,
-            merged_raw_batch.precursor_mz,
-            merged_raw_batch.charge,
-            merged_raw_batch.gt_peptide
-        )
-    
-    return DenovoGlobalResult(
-        resolved_preds.pred_mz,
-        resolved_preds.pred_peptide,
-        resolved_preds.pred_score,
-        resolved_preds.direction,
-        merged_raw_batch.fwd_score,
-        merged_raw_batch.fwd_peptide,
-        merged_raw_batch.rev_score,
-        merged_raw_batch.rev_peptide,
-        merged_raw_batch.precursor_mz,
-        merged_raw_batch.charge
-    )
 
 def parse_device(device_input: int | str):
     if isinstance(device_input, int):
@@ -569,3 +535,62 @@ def estimate_analytical_batch_size(
             candidate = max(1, (candidate // alignment) * alignment)
 
     return 1
+
+def _format_three_line_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Return a Markdown-style three-line table as a string."""
+    col_widths = [max(len(str(rows[i][j])) for i in range(len(rows))) for j in range(len(headers))]
+    for j, h in enumerate(headers):
+        col_widths[j] = max(col_widths[j], len(h))
+
+    def fmt(cells):
+        return "| " + " | ".join(str(cell).ljust(col_widths[j]) for j, cell in enumerate(cells)) + " |"
+
+    sep = "|" + "|".join("-" * (col_widths[j] + 2) for j in range(len(headers))) + "|"
+    lines = [fmt(headers), sep, fmt(rows[0])]
+    return "\n".join(lines)
+
+def _log_eval_summary(
+    pred_peptides: list[str],
+    gt_peptides: list[str],
+    pred_scores: list[float],
+    peptide_tokenizer: PTMPeptideTokenizer,
+    species_name: str = "",
+):
+    """Compute evaluation metrics and print a three-line grid to the log."""
+    ptm_list = ["C+57.021", "M+15.995", "N+0.984", "Q+0.984"]
+
+    batch, n_pep, n_aa_true, n_aa_pred, n_ptm_true, n_ptm_pred, n_pep_pred_non_empty = aa_match_batch(
+        gt_peptides,
+        pred_peptides,
+        peptide_tokenizer.masses,
+        ptm_list,
+        0.5,
+        0.1,
+        "best",
+    )
+    metrics = aa_match_metrics(
+        batch,
+        n_pep,
+        n_aa_true,
+        n_aa_pred,
+        n_ptm_true,
+        n_ptm_pred,
+        n_pep_pred_non_empty,
+        pred_scores,
+    )
+    full_accuracy = sum(p == g for p, g in zip(pred_peptides, gt_peptides)) / max(len(gt_peptides), 1)
+
+    headers = [
+        "aa_precision",
+        "aa_recall",
+        "curve_auc",
+        "pep_precision",
+        "pep_recall",
+        "ptm_precision",
+        "ptm_recall",
+        "full_accuracy",
+    ]
+    values = [metrics[h] for h in headers[:-1]] + [full_accuracy]
+    row = [f"{v:.6f}" for v in values]
+    table = _format_three_line_table(headers, [row])
+    logger.info(f"Evaluation summary for {species_name or 'dataset'}:\n{table}")

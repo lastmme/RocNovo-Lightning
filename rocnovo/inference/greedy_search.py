@@ -24,6 +24,7 @@ def greedy_search(
     device = mem_hidden_states.device
     batch_size = mem_hidden_states.shape[0]
     max_length = inference_config.max_len + 1
+    original_precursor = precursor
 
     all_tokens = torch.full(
         (batch_size, max_length + 1),
@@ -124,13 +125,13 @@ def greedy_search(
     fwd_mass = metadata.idx2masses[final_tokens].sum(dim=1) + H2O
     rev_mass = metadata.idx2masses[final_tokens_reverse].sum(dim=1) + H2O
     fwd_mz = torch.where(
-        precursor.charge > 0,
-        fwd_mass / precursor.charge + PROTON,
+        original_precursor.charge > 0,
+        fwd_mass / original_precursor.charge + PROTON,
         fwd_mass
     )
     rev_mz = torch.where(
-        precursor.charge > 0,
-        rev_mass / precursor.charge + PROTON,
+        original_precursor.charge > 0,
+        rev_mass / original_precursor.charge + PROTON,
         rev_mass
     )
 
