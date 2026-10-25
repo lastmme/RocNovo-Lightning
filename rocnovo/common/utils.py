@@ -5,7 +5,7 @@ import torch
 from rocnovo.common.io import normalize_path
 from rocnovo.module.denovo import Denovo
 
-def _deep_merge_dicts(default_dict: dict, override_dict: dict) -> dict:
+def _deep_merge_dicts(default_dict: dict, override_dict: dict):
     merged = copy.deepcopy(default_dict)
     for k, v in override_dict.items():
         if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
@@ -19,7 +19,7 @@ def load_denovo_from_checkpoint(
     ckpt_path: str,
     inference_config_overrides: dict,
     device: torch.device
-) -> tuple["Denovo", dict]:
+):
     ckpt_path = normalize_path(ckpt_path)
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "hyper_parameters" in checkpoint:

@@ -16,6 +16,8 @@ class InferenceConfig:
     gradscaling_enabled: bool=True
     use_cross_cache: bool=True
     use_self_cache: bool=True
+    auto_batch_size: bool=True
+    metrics_progress_bar: bool=True
 
 @dataclass(frozen=True)
 class RawSearchResult:
@@ -23,6 +25,8 @@ class RawSearchResult:
     fwd_peptide: list[str]
     rev_score: npt.NDArray
     rev_peptide: list[str]
+    fwd_token_logprobs: list[str]
+    rev_token_logprobs: list[str]
 
 @dataclass(frozen=True)
 class BaseDenovoResult(RawSearchResult):
@@ -38,12 +42,16 @@ class BaseEvalResult(BaseDenovoResult):
 class TheoreticalMz:
     fwd_mz: npt.NDArray
     rev_mz: npt.NDArray
+    fwd_mass_fit: npt.NDArray
+    rev_mass_fit: npt.NDArray
 
 @dataclass(frozen=True)
 class ResolvedPrediction:
     pred_mz: npt.NDArray
     pred_peptide: list[str]
     pred_score: npt.NDArray
+    pred_mass_fit: npt.NDArray
+    pred_token_logprobs: list[str]
     direction: list[Literal["fwd", "rev"]]
 
 @dataclass(frozen=True)
@@ -59,7 +67,7 @@ class EvalResult(BaseEvalResult, TheoreticalMz):
     pass
 
 class ExportMixin:
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self):
         data = {f.name: getattr(self, f.name) for f in fields(self)}
         return pd.DataFrame(data)
 
@@ -90,11 +98,15 @@ class ExportMixin:
             "pred_mz",
             "pred_peptide",
             "pred_score",
+            "pred_mass_fit",
+            "pred_token_logprobs",
             "direction",
             "fwd_score",
             "fwd_peptide",
+            "fwd_token_logprobs",
             "rev_score",
             "rev_peptide",
+            "rev_token_logprobs",
             "precursor_mz",
             "charge",
         ]
@@ -112,11 +124,15 @@ class ExportMixin:
                     "pred_mz": float(resolved_preds.pred_mz[i]),
                     "pred_peptide": resolved_preds.pred_peptide[i],
                     "pred_score": float(resolved_preds.pred_score[i]),
+                    "pred_mass_fit": bool(resolved_preds.pred_mass_fit[i]),
+                    "pred_token_logprobs": resolved_preds.pred_token_logprobs[i],
                     "direction": resolved_preds.direction[i],
                     "fwd_score": float(batch_result.fwd_score[i]),
                     "fwd_peptide": batch_result.fwd_peptide[i],
+                    "fwd_token_logprobs": batch_result.fwd_token_logprobs[i],
                     "rev_score": float(batch_result.rev_score[i]),
                     "rev_peptide": batch_result.rev_peptide[i],
+                    "rev_token_logprobs": batch_result.rev_token_logprobs[i],
                     "precursor_mz": float(batch_result.precursor_mz[i]),
                     "charge": int(batch_result.charge[i]),
                 }

@@ -83,7 +83,7 @@ class PeakRotaryPositionalEmbeddings(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
 
     @torch.amp.autocast(device_type="cuda", enabled=False)
-    def forward(self, positions: torch.LongTensor) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    def forward(self, positions: torch.LongTensor):
         freqs = torch.einsum("bl,d->bld", positions, self.inv_freq)
         return (freqs.cos(), freqs.sin())
 

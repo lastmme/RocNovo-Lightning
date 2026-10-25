@@ -43,7 +43,7 @@ class Config:
             self.config = yaml.safe_load(template.render())
             self._convert_optim_beta_type()
     
-    def __getitem__(self, name: str) -> Any:
+    def __getitem__(self, name: str):
         return self.config[name]
 
     def __repr__(self):

@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import torch
 import torch.nn.functional as F
 import einops
+import numpy as np
 
 from rocnovo.config.model import Cache
 from rocnovo.module.denovo import Denovo
@@ -19,6 +20,8 @@ from rocnovo.inference.utils import  _prepare_token_metadata, SpecialTokens
     V: Vocab Size
     T: Current Step
 """
+
+LOGPROB_SENTINEL = -1e4
 
 @dataclass(frozen=True)
 class Size:
@@ -42,12 +45,13 @@ class MetaData:
 class Current:
     tokens: torch.LongTensor  # [B, S, L]
     scores: torch.FloatTensor # [B, S, L, V]
+    token_logprobs: torch.FloatTensor # [B, S, L]
     cumsum_scores: torch.FloatTensor # [B, S]
 
 @dataclass
 class History:
     tokens: torch.LongTensor  # [B, S, L, L]
-    scores: torch.FloatTensor # [B, S, L]
+    logprobs: torch.FloatTensor # [B, S, L, L]
     mass_fits: torch.BoolTensor # [B, S, L]
 
 @dataclass
@@ -70,6 +74,9 @@ class Flag:
 class BestResult:
     tokens: torch.LongTensor  # [B, S, L]
     scores: torch.FloatTensor # [B, S, L]
+    mass_fits: torch.BoolTensor # [B]
+    logprobs: torch.FloatTensor # [B, L], per-position log-prob of the chosen tokens
+    lengths: torch.LongTensor # [B], emitted entries incl. the terminating SOS
 
 @dataclass(frozen=True)
 class BirdirectBestResult:
@@ -110,9 +117,15 @@ def _prepare_current_info(
         device=device,
     )
 
+    token_logprobs = torch.zeros(
+        (B, S, L),
+        device=device,
+    )
+
     return Current(
         tokens,
         scores,
+        token_logprobs,
         cumsum_scores
     )
 
@@ -127,9 +140,9 @@ def _prepare_history_info(
         dtype=torch.long,
         device=device
     )
-    scores = torch.full(
-        (B, S, L),
-        fill_value=-2.0,
+    logprobs = torch.full(
+        (B, S, L, L),
+        fill_value=LOGPROB_SENTINEL,
         device=device
     )
     mass_fits = torch.zeros(
@@ -140,7 +153,7 @@ def _prepare_history_info(
 
     return History(
         tokens,
-        scores,
+        logprobs,
         mass_fits,
     )
 
@@ -208,24 +221,6 @@ class BeamStat:
         self.special_tokens = special_tokens
         self.device = device
 
-        # Per-beam mass-fit flag for the most recent quality-control step.
-        # It is updated in _apply_quality_control and consumed in _write_history.
-        self._mass_fits = torch.zeros(
-            batch_size * config.num_beams,
-            dtype=torch.bool,
-            device=device
-        )
-
-        # Step at which each beam finished (generated SOS). Used by the empty-
-        # history fallback in get_best_peptide to normalise scores consistently
-        # with entries written to history.
-        self._finished_step = torch.zeros(
-            batch_size,
-            config.num_beams,
-            dtype=torch.long,
-            device=device,
-        )
-
         self.precursors = precursors.repeat_beamsize(config.num_beams)
         self.tokenizer = tokenizer
         self.config = config
@@ -237,17 +232,6 @@ class BeamStat:
     @property
     def active(self):
         return self.flag.active.clone()
-
-    def _record_finished_steps(self):
-        """Record the current step for beams that just became inactive."""
-        was_active = self.flag.active.view(
-            self.size.batch_size, self.size.beam_size
-        ).clone()
-        self.flag.update()
-        newly_finished = was_active & (~self.flag.active.view(
-            self.size.batch_size, self.size.beam_size
-        ))
-        self._finished_step[newly_finished] = self.current_step
 
     def _apply_quality_control(self, tokens: torch.LongTensor):
         BS = self.size.batch_size * self.size.beam_size
@@ -275,7 +259,7 @@ class BeamStat:
                     tokens[row, col - 1]
                 ]
                 multiple_n_term = is_n_term_last & is_n_term_last_prev
-                
+
                 mask = torch.arange(self.size.max_len, device=self.device)[None, :] < col[:, None]
                 internal_n_term = self.metadata.is_n_term_token[tokens] & mask
                 internal_n_term = internal_n_term.any(dim=1)
@@ -287,12 +271,10 @@ class BeamStat:
                 internal_n_term = internal_n_term.any(dim=1)
                 self.flag.discarded |= internal_n_term
 
-        if self.current_step < 2:
-            return
-        
         # [B * S, L]
         pred_tokens = tokens[:, 1:self.current_step + 1]
-        peptide_length = self.current_step - self.flag.finished.to(torch.long)
+        is_special = (pred_tokens == self.special_tokens.sos) | (pred_tokens == self.special_tokens.pad)
+        peptide_length = (~is_special).sum(dim=1)
         # [B * S]
         peptide_cur_masses = self.metadata.idx2masses[pred_tokens].sum(dim=1) + H2O
         precursor_charges = self.precursors.charge.to(torch.long)
@@ -327,11 +309,6 @@ class BeamStat:
             )
             exceeds_mass |= ~self.flag.finished & (neg_errors > self.config.mass_tolerance).all(dim=1)
 
-        # Keep the per-beam mass-fit flag for later history selection.
-        # The final ``flag.fits`` additionally requires min_len; for the
-        # get_best_peptide fallback we want to relax the min_len constraint
-        # while still preferring mass-compliant candidates.
-        self._mass_fits = fits_mass
         self.flag.fits = self.flag.finished & fits_mass & (peptide_length >= self.size.min_len)
         self.flag.discarded |= self.flag.finished & (peptide_length < self.size.min_len)
         self.flag.finished |= exceeds_mass
@@ -344,134 +321,128 @@ class BeamStat:
         written_idx = written_idx.nonzero(as_tuple=True)[0]
         if written_idx.numel() == 0:
             return
-        
+
         row = written_idx // self.size.beam_size
         col = written_idx % self.size.beam_size
-        mean_scores = self.current.cumsum_scores[row, col] / self.current_step
-        exp_scores = torch.exp(mean_scores)
-        written_scores = torch.where(
-            self.flag.fits[written_idx],
-            exp_scores,
-            exp_scores - 1
-        )
-        
         written_tokens = tokens[written_idx]
         if self.current_step + 1 < self.size.max_len:
             written_tokens[:, self.current_step + 1:] = self.special_tokens.sos
-        
-        self.history.scores[row, col, self.current_step] = written_scores
+
         self.history.tokens[row, col, self.current_step, :] = written_tokens
-        # Record whether the written entry satisfies the mass tolerance
-        # regardless of the min_len requirement.
-        self.history.mass_fits[row, col, self.current_step] = self._mass_fits[written_idx]
+        # Slot t stores the taken log-probs of steps 1..t in its first t positions
+        self.history.logprobs[row, col, self.current_step, :self.current_step] = (
+            self.current.token_logprobs[row, col, 1:self.current_step + 1]
+        )
+        # Written entries always satisfy min_len, so flag.fits marks mass fit
+        self.history.mass_fits[row, col, self.current_step] = self.flag.fits[written_idx]
 
     def get_best_peptide(self):
-        scores = einops.rearrange(
-            self.history.scores,
-            "B S L -> B (S L)"
-        )
-        tokens = einops.rearrange(
-            self.history.tokens,
-            "B S T L -> B (S T) L"
-        )
-        mass_fits = einops.rearrange(
-            self.history.mass_fits,
-            "B S L -> B (S L)"
-        )
+        # Aggregate: score = exp(mean(logp)), the only exp in the whole pipeline
+        logprobs = self.history.logprobs
+        B, S, T, L = logprobs.shape
+        steps = torch.arange(T, device=self.device)
+        pos_mask = torch.arange(L, device=self.device)[None, :] < steps[:, None]  # [T, L]
+        step_sums = (logprobs * pos_mask[None, None]).sum(dim=-1)  # [B, S, T]
+        scores = torch.exp(step_sums / steps.clamp_min(1))
+        scores[:, :, 0] = 0.0
 
-        # Highest-scoring candidate (legacy behaviour).
-        best_scores, best_tokens_idx = torch.max(scores, dim=1)
+        scores = einops.rearrange(scores, "B S T -> B (S T)")
+        tokens = einops.rearrange(self.history.tokens, "B S T L -> B (S T) L")
+        mass_fits = einops.rearrange(self.history.mass_fits, "B S T -> B (S T)")
+
+        # Prefer mass-fitting candidates when any exists, otherwise rank by score
+        has_fit = mass_fits.any(dim=1)
+        fitting_only = torch.where(mass_fits, scores, torch.full_like(scores, -1.0))
+        best_scores, best_idx = torch.max(
+            torch.where(has_fit[:, None], fitting_only, scores),
+            dim=1,
+        )
         batch_idx = torch.arange(scores.shape[0], device=self.device)
-        best_tokens = tokens[batch_idx, best_tokens_idx, :]
+        final_tokens = tokens[batch_idx, best_idx, :]
+        best_mass_fits = mass_fits[batch_idx, best_idx].clone()
 
-        # If the top candidate is not mass-compliant, fall back to the best
-        # mass-compliant candidate in history.  The fallback intentionally does
-        # not enforce min_len, but it does require mass fit (and token validity,
-        # which is already guaranteed for written history entries).
-
-        # To avoid overriding high-quality short predictions whose mass is
-        # slightly outside the strict beam-search tolerance (e.g. correct
-        # length-5 peptides), only trigger the fallback when the top candidate
-        # is itself poor (mean log-prob below a threshold).
-        top_fits_mass = mass_fits[batch_idx, best_tokens_idx]
-        # Recover mean log-prob from the stored score.
-        # mass-fit entries: score = exp(mean)
-        # non-mass-fit entries: score = exp(mean) - 1
-        eps = 1e-6
-        top_mean = torch.where(
-            top_fits_mass,
-            torch.log(best_scores.clamp_min(eps)),
-            torch.log((best_scores + 1.0).clamp_min(eps)),
+        # Per-token log-probs of the chosen candidates, aligned to token
+        # positions (position 0 and unused positions stay 0). A history slot
+        # t keeps the log-probs of steps 1..t in its first t entries.
+        flat_logprobs = einops.rearrange(self.history.logprobs, "B S T L -> B (S T) L")
+        slot_steps = best_idx % T
+        compact = flat_logprobs[batch_idx, best_idx]  # [B, L]
+        pos = torch.arange(L, device=self.device)
+        final_logprobs = torch.zeros_like(compact)
+        final_logprobs[:, 1:] = torch.where(
+            pos[None, 1:] <= slot_steps[:, None],
+            compact[:, :-1],
+            torch.zeros_like(compact[:, :-1]),
         )
-        # Never-written history slots have score -2.0; treat them as -inf mean.
-        top_mean = torch.where(best_scores > -1.9, top_mean, float("-inf"))
-        needs_fallback = ~top_fits_mass & (top_mean < -0.5)
-        if not needs_fallback.any():
-            return BestResult(best_tokens, best_scores)
+        final_lengths = slot_steps.clone()
 
-        # Mask non-mass-fitting entries to -inf so torch.max picks the best
-        # compliant one per batch.
-        fallback_scores = torch.where(
-            mass_fits,
-            scores,
-            torch.tensor(float("-inf"), dtype=scores.dtype, device=scores.device),
+        if (best_scores == 0).any():
+            self._empty_history_fallback(final_tokens, best_scores, best_mass_fits, final_logprobs, final_lengths)
+
+        return BestResult(final_tokens, best_scores, best_mass_fits, final_logprobs, final_lengths)
+
+    def _empty_history_fallback(
+        self,
+        final_tokens: torch.LongTensor,
+        best_scores: torch.FloatTensor,
+        best_mass_fits: torch.BoolTensor,
+        final_logprobs: torch.FloatTensor,
+        final_lengths: torch.LongTensor,
+    ):
+        """Overwrite empty-history samples with the best live beam holding
+        valid tokens, in place and per sample."""
+        empty_history = best_scores == 0
+        current_tokens = self.current.tokens[empty_history]  # [N, S, L]
+        current_scores = self.current.cumsum_scores[empty_history]  # [N, S]
+        valid_mask = (
+            (current_tokens != self.special_tokens.sos)
+            & (current_tokens != self.special_tokens.pad)
         )
-        fallback_scores, fallback_tokens_idx = torch.max(fallback_scores, dim=1)
+        has_valid_tokens = valid_mask.any(dim=-1)  # [N, S]
+        selectable_scores = torch.where(
+            has_valid_tokens,
+            current_scores,
+            torch.tensor(float("-inf"), dtype=current_scores.dtype, device=current_scores.device),
+        )
+        best_beam_scores, best_beam_idx = torch.max(selectable_scores, dim=1)
 
-        # Use the fallback only when a mass-fitting candidate actually exists
-        # (i.e. its score is not the -inf sentinel).  The default history score
-        # is -2.0 for never-written slots, so any real written entry is larger.
-        fallback_exists = fallback_scores > -1.9
-        use_fallback = needs_fallback & fallback_exists
+        n_idx = torch.arange(current_tokens.shape[0], device=self.device)
+        has_valid = has_valid_tokens[n_idx, best_beam_idx]
 
-        final_idx = torch.where(use_fallback, fallback_tokens_idx, best_tokens_idx)
-        final_scores = torch.where(use_fallback, fallback_scores, best_scores)
-        final_tokens = tokens[batch_idx, final_idx, :]
+        # Derive the finish step from tokens: first special token after position 0
+        special_after_start = (
+            (current_tokens == self.special_tokens.sos)
+            | (current_tokens == self.special_tokens.pad)
+        )
+        special_after_start[:, :, 0] = False
+        has_stop = special_after_start.any(dim=-1)  # [N, S]
+        stop_step = torch.argmax(special_after_start.long(), dim=-1)  # [N, S]
+        # Number of choices made by the beam: positions 1..stop_step with a
+        # terminator, or 1..current_step-1 when it never finished. Used both
+        # as the score normaliser and the log-prob entry count.
+        beam_steps = torch.where(has_stop, stop_step, self.current_step - 1).clamp_min(1)
 
-        # Last-resort fallback: if history contains no written entry for a sample
-        # (score is still the default -2.0), use the best current beam state so
-        # that we never return a completely empty peptide when the model has
-        # produced any real tokens at all.
-        empty_history = final_scores <= -1.9
-        if empty_history.any():
-            current_tokens = self.current.tokens[empty_history]  # [N, S, L]
-            current_scores = self.current.cumsum_scores[empty_history]  # [N, S]
-            finished_steps = self._finished_step[empty_history]  # [N, S]
-            # Count real peptide tokens per beam, ignoring SOS/PAD.
-            valid_mask = (
-                (current_tokens != self.special_tokens.sos)
-                & (current_tokens != self.special_tokens.pad)
-            )
-            valid_count = valid_mask.any(dim=-1)  # [N, S]
-            # Penalise beams with no valid tokens so they are only chosen when
-            # there is no alternative.
-            selectable_scores = torch.where(
-                valid_count,
-                current_scores,
-                torch.tensor(float("-inf"), dtype=current_scores.dtype, device=current_scores.device),
-            )
-            best_beam_scores, best_beam_idx = torch.max(selectable_scores, dim=1)
-            # Only overwrite when at least one beam has a valid token.
-            empty_batch_idx = torch.arange(best_beam_idx.shape[0], device=best_beam_idx.device)
-            has_valid = valid_count[empty_batch_idx, best_beam_idx].any()
-            if has_valid:
-                selected_tokens = current_tokens[empty_batch_idx, best_beam_idx, :]
-                selected_finished_step = finished_steps[empty_batch_idx, best_beam_idx]
-                # Use the step at which the beam finished to normalise the score,
-                # matching the denominator used when writing history. Beams that
-                # never finished (e.g., hit max_len) fall back to current_step.
-                selected_finished_step = torch.where(
-                    selected_finished_step > 0,
-                    selected_finished_step,
-                    self.current_step,
-                )
-                # Score mirrors the non-fit history writing (exp(mean_score) - 1).
-                mean_score = best_beam_scores / selected_finished_step
-                selected_scores = torch.exp(mean_score) - 1.0
-                final_tokens[empty_history] = selected_tokens
-                final_scores[empty_history] = selected_scores
-        
-        return BestResult(final_tokens, final_scores)
+        selected_scores = torch.exp(best_beam_scores / beam_steps[n_idx, best_beam_idx])
+
+        empty_indices = empty_history.nonzero(as_tuple=True)[0]
+        valid_empty_indices = empty_indices[has_valid]
+        final_tokens[valid_empty_indices] = current_tokens[n_idx[has_valid], best_beam_idx[has_valid]]
+        best_scores[valid_empty_indices] = selected_scores[has_valid]
+        best_mass_fits[valid_empty_indices] = False
+
+        # Rebuild the log-prob row from the live beam state
+        final_logprobs[valid_empty_indices] = 0.0
+        sel_token_logprobs = self.current.token_logprobs[empty_history][n_idx[has_valid], best_beam_idx[has_valid]]  # [M, L]
+        sel_steps = beam_steps[n_idx, best_beam_idx][has_valid]  # [M]
+        final_lengths[empty_indices] = 0
+        final_lengths[valid_empty_indices] = sel_steps
+        pos = torch.arange(final_logprobs.shape[-1], device=self.device)
+        fill_mask = pos[None, 1:] <= sel_steps[:, None]
+        final_logprobs[valid_empty_indices, 1:] = torch.where(
+            fill_mask,
+            sel_token_logprobs[:, 1:],
+            torch.zeros_like(sel_token_logprobs[:, 1:]),
+        )
 
     def _write_current(self):
         cumsum_scores = einops.repeat(
@@ -502,15 +473,49 @@ class BeamStat:
             "B -> (B S)",
             S=self.size.beam_size
         )
-        self.current.tokens[:, :, :self.current_step] = einops.rearrange(
+
+        # On dead batches topk indices are arbitrary, keep prefix and step token
+        batch_is_active = self.flag.active.view(self.size.batch_size, self.size.beam_size).any(dim=1)
+
+        new_prefix = einops.rearrange(
             # [B * S, T]
             self.current.tokens[batch_idx, row, :self.current_step],
             "(B S) L -> B S L",
             S=self.size.beam_size
         )
-        self.current.tokens[:, :, self.current_step] = col
+        self.current.tokens[:, :, :self.current_step] = torch.where(
+            batch_is_active[:, None, None],
+            new_prefix,
+            self.current.tokens[:, :, :self.current_step],
+        )
+        self.current.tokens[:, :, self.current_step] = torch.where(
+            batch_is_active[:, None],
+            col,
+            torch.full_like(col, self.special_tokens.pad),
+        )
 
-        batch_is_active = self.flag.active.view(self.size.batch_size, self.size.beam_size).any(dim=1)
+        # Take the chosen token's log-prob directly from the step's log-softmax
+        step_logprobs = einops.rearrange(
+            self.current.scores[:, :, self.current_step, :],
+            "B S V -> B (S V)"
+        )
+        token_logprobs = step_logprobs.gather(1, topk_idx)  # [B, S]
+        new_taken_prefix = einops.rearrange(
+            self.current.token_logprobs[batch_idx, row, :self.current_step],
+            "(B S) L -> B S L",
+            S=self.size.beam_size
+        )
+        self.current.token_logprobs[:, :, :self.current_step] = torch.where(
+            batch_is_active[:, None, None],
+            new_taken_prefix,
+            self.current.token_logprobs[:, :, :self.current_step],
+        )
+        self.current.token_logprobs[:, :, self.current_step] = torch.where(
+            batch_is_active[:, None],
+            token_logprobs,
+            torch.zeros_like(token_logprobs),
+        )
+
         # Samples that have already terminated should keep their last beam scores
         # so the final fallback returns a consistent score regardless of when
         # other samples in the same batch finish.
@@ -520,11 +525,6 @@ class BeamStat:
             self.current.cumsum_scores,
         )
 
-        dead_batches = ~batch_is_active
-        # Avoid .any().item() sync; masked assignment is a no-op when the mask
-        # is all False.
-        self.current.tokens[dead_batches, :, self.current_step] = self.special_tokens.pad
-        
         if self._temp_active_cache is not None:
             global_order = batch_idx * self.size.beam_size + row
             global_to_active_map = torch.clamp(torch.cumsum(self.flag.active.long(), dim=0) - 1, min=0)
@@ -546,7 +546,7 @@ class BeamStat:
         tokens = einops.rearrange(self.current.tokens, "B S L -> (B S) L")
         self._apply_quality_control(tokens)
         self._write_history(tokens)
-        self._record_finished_steps()
+        self.flag.update()
         self.current_step += 1
 
     def init_state(
@@ -568,13 +568,14 @@ class BeamStat:
         self.current.tokens[:, :, self.current_step] = topk_idx
         # [B, S]
         self.current.cumsum_scores = topk_scores
+        self.current.token_logprobs[:, :, self.current_step] = topk_scores
 
         self.cache = cache.repeat_for_beam(self.size.beam_size)
 
         tokens = einops.rearrange(self.current.tokens, "B S L -> (B S) L")
         self._apply_quality_control(tokens)
         self._write_history(tokens)
-        self._record_finished_steps()
+        self.flag.update()
         self.current_step += 1
 
     def get_next_input(self):
@@ -678,6 +679,14 @@ class BirdirectBeamStat:
         rev_result = self.rev_stat.get_best_peptide()
         return BirdirectBestResult(fwd_result, rev_result)
 
+def _format_token_logprobs(logprobs: np.ndarray, lengths: np.ndarray):
+    # Entries cover generated steps 1..lengths[i] incl. the terminating SOS;
+    # validity comes from the recorded length, not from the log-prob value
+    return [
+        ";".join(f"{lp:.6f}" for lp in lps[1:lengths[i] + 1])
+        for i, lps in enumerate(logprobs)
+    ]
+
 def beam_search(
     model: Denovo,
     precursors: Precursor,
@@ -731,14 +740,14 @@ def beam_search(
             step_cache_config,
             stat.fwd_stat.precursors[input.active],
         )
-        
+
         stat.update(
             F.log_softmax(output.logits[:, -1, :], dim=-1),
             output.cache,
             F.log_softmax(output_reverse.logits[:, -1, :], dim=-1),
             output_reverse.cache
         )
-    
+
     result = stat.get_best_peptide()
     fwd_mass = stat.fwd_stat.metadata.idx2masses[result.fwd.tokens].sum(dim=1) + H2O
     rev_mass = stat.rev_stat.metadata.idx2masses[result.rev.tokens].sum(dim=1) + H2O
@@ -752,12 +761,30 @@ def beam_search(
         rev_mass / precursors.charge + PROTON,
         rev_mass
     )
-    
+
+    fwd_scores = result.fwd.scores.cpu().numpy()
+    rev_scores = result.rev.scores.cpu().numpy()
+    fwd_fits = result.fwd.mass_fits.cpu().numpy()
+    rev_fits = result.rev.mass_fits.cpu().numpy()
+
+    fwd_token_logprobs = _format_token_logprobs(
+        result.fwd.logprobs.cpu().numpy(), result.fwd.lengths.cpu().numpy()
+    )
+    rev_token_logprobs = _format_token_logprobs(
+        result.rev.logprobs.cpu().numpy(), result.rev.lengths.cpu().numpy()
+    )
+    fwd_peptides = peptide_tokenizer.detokenize_by_array(result.fwd.tokens.cpu().numpy())
+    rev_peptides = peptide_tokenizer.reverse_detokenize_by_array(result.rev.tokens.cpu().numpy())
+
     return SearchResult(
         fwd_mz.cpu().numpy(),
         rev_mz.cpu().numpy(),
-        result.fwd.scores.cpu().numpy(),
-        peptide_tokenizer.detokenize_by_array(result.fwd.tokens.cpu().numpy()),
-        result.rev.scores.cpu().numpy(),
-        peptide_tokenizer.reverse_detokenize_by_array(result.rev.tokens.cpu().numpy()),
+        fwd_fits,
+        rev_fits,
+        fwd_scores,
+        fwd_peptides,
+        rev_scores,
+        rev_peptides,
+        fwd_token_logprobs,
+        rev_token_logprobs,
     )

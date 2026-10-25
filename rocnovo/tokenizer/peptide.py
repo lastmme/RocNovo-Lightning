@@ -79,9 +79,11 @@ class PTMPeptideTokenizer:
         residues: Union[dict[str, float], Literal["canonical", "massivekb"]] = "canonical",
         max_len: int = inf,
         reverse: bool = False,
+        mapping: dict[str, str] | None = None,
     ):
         self.max_len = max_len
         self.reverse = reverse
+        self.mapping = mapping or {}
         if isinstance(residues, dict):
             self.masses = residues
         else:
@@ -143,7 +145,7 @@ class PTMPeptideTokenizer:
         return self._first_valid_token_idx
 
     @staticmethod
-    def _extract_peptide_string(seq: npt.NDArray, reverse: bool) -> str:
+    def _extract_peptide_string(seq: npt.NDArray, reverse: bool):
         """Extract the peptide string from a token string sequence.
 
         The sequence is delimited by ``<SOS>`` tokens. Tokens equal to ``<PAD>``
@@ -212,11 +214,11 @@ class PTMPeptideTokenizer:
         if self.reverse:
             seq = seq[::-1]
 
-        # 如果超出最大分析长度, 则进行截断
+        # Truncate if the sequence exceeds the maximum analysis length
         if len(seq) > self.max_len:
             seq = seq[: self.max_len]
         seq = [SOS] + seq + [SOS]
-        return torch.LongTensor([self.vocab2idx[item] for item in seq])
+        return torch.LongTensor([self.vocab2idx[self.mapping.get(item, item)] for item in seq])
 
     def reverse_tokenize(self, seq: str):
         seq = seq.replace("I", "L")
@@ -226,7 +228,7 @@ class PTMPeptideTokenizer:
         if len(seq) > self.max_len:
             seq = seq[: self.max_len]
         seq = [SOS] + seq + [SOS]
-        return torch.LongTensor([self.vocab2idx[item] for item in seq])
+        return torch.LongTensor([self.vocab2idx[self.mapping.get(item, item)] for item in seq])
 
     def get_valid_tokens(self, tokens: torch.LongTensor):
         sos_token_id = self.vocab2idx[SOS]
@@ -242,7 +244,7 @@ class PTMPeptideTokenizer:
             start = sos_positions[0] + 1
             end = len(tokens)
         else:
-            # 没有 <SOS>，直接返回整个序列
+            # No <SOS>, return the whole sequence
             start = 0
             end = len(tokens)
 
@@ -318,7 +320,7 @@ class PTMPeptideTokenizer:
 
         return calc_mass
 
-    def tokens_to_prefix_masses_torch(self, tokens_seq: torch.Tensor) -> torch.Tensor:
+    def tokens_to_prefix_masses_torch(self, tokens_seq: torch.Tensor):
         mass_lookup = self._vocab_mass_tensor.to(tokens_seq.device)
         mass_seq = mass_lookup[tokens_seq]
         prefix_mass_seq = torch.cumsum(mass_seq, dim=1)

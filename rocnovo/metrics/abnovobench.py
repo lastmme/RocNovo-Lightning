@@ -6,7 +6,7 @@ from tqdm import tqdm
 from spectrum_utils.utils import mass_diff
 from sklearn.metrics import auc
 
-def split_peptide(peptide: str) -> list[str]:
+def split_peptide(peptide: str):
     peptide = peptide.replace("I", "L")
     parts = re.split(r"(?<=.)(?=[A-Z])", peptide)
     return parts
@@ -14,7 +14,7 @@ def split_peptide(peptide: str) -> list[str]:
 def aa_match_prefix(
     p1: list[str], p2: list[str], aa_dict: dict[str,float], ptm_list: list[str],
     cum_thresh: float = 0.5, ind_thresh: float = 0.1
-) -> tuple[np.ndarray, bool, np.ndarray, np.ndarray]:
+):
     """
     Match prefix of two peptides by cumulative mass. Return arrays of matches and full-match flag.
     """
@@ -45,7 +45,7 @@ def aa_match_prefix(
 def aa_match(
     p1: list[str], p2: list[str], aa_dict: dict[str,float], ptm_list: list[str],
     cum_thresh: float = 0.5, ind_thresh: float = 0.1, mode: str = "best"
-) -> tuple[np.ndarray, bool, np.ndarray, np.ndarray]:
+):
     """
     Compute AA-level matches for two peptides. Uses prefix and then suffix matching if needed.
     """
@@ -73,8 +73,9 @@ def aa_match(
 
 def aa_match_batch(
     gts: Iterable[str], preds: Iterable[str], aa_dict: dict[str,float],
-    ptm_list: list[str], cum_thresh: float, ind_thresh: float, mode: str
-) -> tuple[list[tuple[np.ndarray,bool,np.ndarray,np.ndarray]], int, int, int, int, int, int]:
+    ptm_list: list[str], cum_thresh: float, ind_thresh: float, mode: str,
+    progress_bar: bool=True
+):
     """
     Batch comparison of ground-truth and predicted peptide lists.
 
@@ -93,7 +94,7 @@ def aa_match_batch(
     n_aa_pred = 0
     n_ptm_true = n_ptm_pred = 0
     n_pep_pred_non_empty = 0
-    for gt, pr in tqdm(zip(gts, preds), total=len(gts)):
+    for gt, pr in tqdm(zip(gts, preds), total=len(gts), disable=not progress_bar):
         seq_gt = split_peptide(gt)
         if isinstance(pr, str) and pr.strip() and pr.strip().lower() != "nan":
             seq_pr = split_peptide(pr)
@@ -115,7 +116,7 @@ def aa_match_metrics(
     n_pep_true: int, n_aa_true: int, n_aa_pred: int,
     n_ptm_true: int, n_ptm_pred: int, n_pep_pred_non_empty: int,
     scores: list[float]
-) -> dict[str, float]:
+):
     """
     Compute evaluation metrics:
     - aa_precision, aa_recall

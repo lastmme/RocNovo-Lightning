@@ -71,18 +71,18 @@ class BaseParser(ABC):
         self.annotations = annotations
 
     @abstractmethod
-    def open(self) -> MzML | MGF | MzXML:
+    def open(self):
         pass
 
     @abstractmethod
-    def pre_traverse(self) -> Generator[int, None, None]:
+    def pre_traverse(self):
         pass
 
     @abstractmethod
-    def parse_spectrum(self, spectrum: dict) -> BufferItem | AnnotatedBufferItem:
+    def parse_spectrum(self, spectrum: dict):
         pass
 
-    def iter_spectra(self) -> Generator[BufferItem | AnnotatedBufferItem, None, None]:
+    def iter_spectra(self):
         skipped = 0
         with self.open() as spectra:
             for spectrum in spectra:
@@ -165,7 +165,7 @@ class MzMLParser(BaseParser):
     def open(self):
         return MzML(str(self.path))
     
-    def pre_traverse(self) -> Generator[int, None, None]:
+    def pre_traverse(self):
         context = ET.iterparse(str(self.path), events=("start", "end"))
         _, root = next(context)
         
@@ -226,7 +226,7 @@ class MzXMLParser(BaseParser):
     def open(self):
         return MzXML(str(self.path))
 
-    def pre_traverse(self) -> Generator[int, None, None]:
+    def pre_traverse(self):
         context = ET.iterparse(str(self.path), events=("start", "end"))
         _, root = next(context)
         

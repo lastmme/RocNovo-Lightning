@@ -72,7 +72,7 @@ class HDF5Buffer:
 def _construct_mods_dict(
     allowed_fixed_mods: list[str]=FIXED_MODS,
     allowed_var_mods: list[str]=VAR_MODS
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+):
     swap_map: dict[str, str] = {}
     fixed_mods_map: dict[str, Any] = {}
     var_mods_map: dict[str, Any] = {}

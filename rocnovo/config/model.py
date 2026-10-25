@@ -63,10 +63,10 @@ class Cache:
         
         return self.kv_cache[idx]
     
-    def has_self_cache(self) -> bool:
+    def has_self_cache(self):
         return self.kv_cache is not None and len(self.kv_cache) > 0
 
-    def has_cross_cache(self) -> bool:
+    def has_cross_cache(self):
         return self.cross_kv_cache is not None and len(self.cross_kv_cache) > 0
 
     def without_self_cache(self):

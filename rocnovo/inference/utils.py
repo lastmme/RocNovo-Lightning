@@ -77,26 +77,35 @@ def _prepare_token_metadata(
 def resolve_bidirectional_predictions(merged_batch: DenovoResult | EvalResult):
     fwd_scores = merged_batch.fwd_score
     rev_scores = merged_batch.rev_score
-    
+
     fwd_peps = np.array(merged_batch.fwd_peptide, dtype=object)
     rev_peps = np.array(merged_batch.rev_peptide, dtype=object)
+    fwd_lps = np.array(merged_batch.fwd_token_logprobs, dtype=object)
+    rev_lps = np.array(merged_batch.rev_token_logprobs, dtype=object)
 
-    fwd_peps = np.where(fwd_scores == -2.0, "", fwd_peps)
-    rev_peps = np.where(rev_scores == -2.0, "", rev_peps)
+    fwd_peps = np.where(fwd_scores == 0.0, "", fwd_peps)
+    rev_peps = np.where(rev_scores == 0.0, "", rev_peps)
 
     fwd_wins = fwd_scores >= rev_scores
+    # Prefer the mass-fitting direction when only one of them fits
+    fwd_wins = np.where(merged_batch.rev_mass_fit & ~merged_batch.fwd_mass_fit, False, fwd_wins)
+    fwd_wins = np.where(merged_batch.fwd_mass_fit & ~merged_batch.rev_mass_fit, True, fwd_wins)
     fwd_wins = np.where((fwd_peps == "") & (rev_peps != ""), False, fwd_wins)
     fwd_wins = np.where((rev_peps == "") & (fwd_peps != ""), True, fwd_wins)
 
     pred_mzs = np.where(fwd_wins, merged_batch.fwd_mz, merged_batch.rev_mz)
     pred_peptides = np.where(fwd_wins, fwd_peps, rev_peps).tolist()
     pred_scores = np.where(fwd_wins, fwd_scores, rev_scores)
+    pred_mass_fits = np.where(fwd_wins, merged_batch.fwd_mass_fit, merged_batch.rev_mass_fit)
+    pred_token_logprobs = np.where(fwd_wins, fwd_lps, rev_lps).tolist()
     directions = np.where(fwd_wins, "fwd", "rev").tolist()
-    
+
     return ResolvedPrediction(
         pred_mzs,
         pred_peptides,
         pred_scores,
+        pred_mass_fits,
+        pred_token_logprobs,
         directions
     )
 
@@ -169,7 +178,7 @@ def _measure_decode_peak_memory(
     gradscaler_enabled: bool,
     device: torch.device,
     max_decode_steps: int | None = None,
-) -> int:
+):
     """Run encode + prefill + decode steps and return peak allocated bytes.
 
     By default this simulates the full decoding length (``max_length`` steps),
@@ -337,7 +346,7 @@ def _estimate_analytical_memory(
     use_self_cache: bool,
     gradscaler_enabled: bool,
     batch_size: int,
-) -> int:
+):
     """Return the dimensionally estimated peak memory (bytes) for a given batch size."""
     n_byte = 2 if gradscaler_enabled else 4
     S = max(1, num_beams)
@@ -391,10 +400,10 @@ def _estimate_analytical_memory(
         per_direction = (
             8 * B * S * L
             + 4 * B * S * L * V
-            + 4 * B * S
-            + 8 * B * S * L * L
             + 4 * B * S * L
             + 4 * B * S
+            + 8 * B * S * L * L
+            + 4 * B * S * L * L
         )
         beam_buffer = 2 * per_direction
 
@@ -410,12 +419,11 @@ def estimate_analytical_batch_size(
     device: torch.device = torch.device("cuda:0"),
     use_cross_cache: bool = True,
     use_self_cache: bool = True,
-    static_overhead_gb: float = 1.5,
-    safety_margin: float = 0.10,
-    validation_safety_factor: float = 0.85,
-    oom_reduction_factor: float = 0.9,
+    static_overhead_gb: float = 0.5,
+    safety_margin: float = 0.05,
     alignment: int = 8,
-) -> int:
+    max_probes: int = 6,
+):
     if device.type != "cuda":
         return 64
 
@@ -431,12 +439,9 @@ def estimate_analytical_batch_size(
         f"use_cross_cache={use_cross_cache}, use_self_cache={use_self_cache}"
     )
 
-    # Calibrate the analytical formula with two small probes (batch sizes 2 and 4).
-    # The formula captures the per-batch scaling of persistent buffers and dominant
-    # activations, but misses fixed costs and some super-linear effects. Fitting a
-    # line through two measured points yields a more reliable slope than a single
-    # point, where fixed overhead would dominate.
-    calibration_batches = (2, 4)
+    # Calibrate the analytical formula with two probes. The larger second
+    # point reduces the relative noise of the fitted slope.
+    calibration_batches = (4, 16)
     measured_peaks = []
     for calibration_batch in calibration_batches:
         try:
@@ -475,16 +480,14 @@ def estimate_analytical_batch_size(
         for b in calibration_batches
     ]
 
-    # Fit measured_peak = fixed + slope * batch_size to the two probes.
+    # Fit measured_peak = fixed + slope * batch_size. The analytical slope is
+    # a lower bound: it covers the beam buffers that the probes do not touch.
     measured_slope = (
         measured_peaks[1] - measured_peaks[0]
     ) / (calibration_batches[1] - calibration_batches[0])
     analytical_slope = (
         analytical_peaks[1] - analytical_peaks[0]
     ) / (calibration_batches[1] - calibration_batches[0])
-    # The analytical slope is usually too small because it misses per-step
-    # activation growth. Use the measured slope directly; it already reflects the
-    # true per-batch memory cost at small scale.
     slope_per_batch = max(measured_slope, analytical_slope)
     fixed_overhead = max(0, measured_peaks[0] - slope_per_batch * calibration_batches[0])
 
@@ -494,21 +497,20 @@ def estimate_analytical_batch_size(
         f"fixed_overhead={fixed_overhead/1e9:.3f}GB"
     )
 
+    def _align_down(b: int):
+        return max(1, (int(b) // alignment) * alignment)
+
     if slope_per_batch <= 0:
         logger.warning("Non-positive slope; using conservative default.")
-        candidate = alignment
-    else:
-        candidate = int(
-            (target_vram * validation_safety_factor - fixed_overhead) / slope_per_batch
-        )
-    
-    candidate = max(1, (candidate // alignment) * alignment)
-    logger.debug(f"Calibrated estimate before validation: {candidate}")
+        return alignment
 
-    # Validate with synthetic extreme data: 300 peaks and full max_length decode.
-    # The probe must run the complete decoding length so that the KV cache reaches
-    # its maximum size; this is the worst-case memory scenario.
-    while candidate >= 1:
+    candidate = _align_down((target_vram - fixed_overhead) / slope_per_batch)
+
+    # Validate on real hardware and refine: keep the largest batch that fits
+    # within target_vram. Successful probes correct the slope from above and
+    # push the next candidate upward; OOMs bisect the search interval.
+    lo, hi = 0, None
+    for _ in range(max_probes):
         try:
             peak = _measure_decode_peak_memory(
                 model,
@@ -521,22 +523,56 @@ def estimate_analytical_batch_size(
                 gradscaler_enabled=gradscaler_enabled,
                 device=device,
             )
-            logger.debug(
-                f"Validated batch size {candidate}: peak={peak/1e9:.3f}GB"
-            )
-            return candidate
-        
         except RuntimeError as e:
             logger.warning(
-                f"Validation OOM for batch size {candidate}: {e}. "
-                f"Reducing by {oom_reduction_factor:.2f} and retrying."
+                f"Validation OOM for batch size {candidate}: {e}. Bisecting."
             )
-            candidate = int(candidate * oom_reduction_factor)
-            candidate = max(1, (candidate // alignment) * alignment)
+            hi = candidate
+            if lo == 0:
+                candidate = _align_down(max(1, candidate // 2))
+            else:
+                if hi - lo <= alignment:
+                    break
+                candidate = _align_down((lo + hi) / 2)
+            continue
 
-    return 1
+        # A probe that exceeds the target headroom is treated like an OOM:
+        # shrink until the measured peak fits within target_vram.
+        if peak > target_vram:
+            logger.debug(
+                f"Batch size {candidate} exceeds target headroom "
+                f"(peak={peak/1e9:.3f}GB > target={target_vram/1e9:.3f}GB). Bisecting."
+            )
+            hi = candidate
+            if lo == 0:
+                candidate = _align_down(max(1, candidate // 2))
+            else:
+                if hi - lo <= alignment:
+                    break
+                candidate = _align_down((lo + hi) / 2)
+            continue
 
-def _format_three_line_table(headers: list[str], rows: list[list[str]]) -> str:
+        lo = candidate
+        logger.debug(f"Validated batch size {candidate}: peak={peak/1e9:.3f}GB")
+
+        # Refit the slope with the validated large-batch point, then look
+        # upward while the projected peak stays within target_vram.
+        if candidate > calibration_batches[-1]:
+            measured_slope = (peak - measured_peaks[0]) / (candidate - calibration_batches[0])
+            slope_per_batch = max(slope_per_batch, measured_slope)
+
+        next_candidate = _align_down((target_vram - fixed_overhead) / slope_per_batch)
+        if hi is not None:
+            if hi - lo <= alignment:
+                break
+            next_candidate = min(next_candidate, _align_down((lo + hi) / 2))
+        if next_candidate <= lo:
+            break
+        candidate = next_candidate
+
+    return max(lo, 1)
+
+def _format_three_line_table(headers: list[str], rows: list[list[str]]):
     """Return a Markdown-style three-line table as a string."""
     col_widths = [max(len(str(rows[i][j])) for i in range(len(rows))) for j in range(len(headers))]
     for j, h in enumerate(headers):
@@ -555,6 +591,7 @@ def _log_eval_summary(
     pred_scores: list[float],
     peptide_tokenizer: PTMPeptideTokenizer,
     species_name: str = "",
+    progress_bar: bool = True,
 ):
     """Compute evaluation metrics and print a three-line grid to the log."""
     ptm_list = ["C+57.021", "M+15.995", "N+0.984", "Q+0.984"]
@@ -567,6 +604,7 @@ def _log_eval_summary(
         0.5,
         0.1,
         "best",
+        progress_bar=progress_bar,
     )
     metrics = aa_match_metrics(
         batch,

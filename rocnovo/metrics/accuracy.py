@@ -15,7 +15,7 @@ def aa_match_prefix(
     aa_dict: dict[str, float],
     cum_mass_threshold: float = 0.5,
     ind_mass_threshold: float = 0.1,
-) -> tuple[np.ndarray, bool]:
+):
     """
     Find the matching prefix amino acids between two peptide sequences.
 
@@ -71,7 +71,7 @@ def aa_match_prefix_suffix(
     aa_dict: dict[str, float],
     cum_mass_threshold: float = 0.5,
     ind_mass_threshold: float = 0.1,
-) -> tuple[np.ndarray, bool]:
+):
     """
     Find the matching prefix and suffix amino acids between two peptide
     sequences.
@@ -134,7 +134,7 @@ def aa_match(
     cum_mass_threshold: float = 0.5,
     ind_mass_threshold: float = 0.1,
     mode: str = "best",
-) -> tuple[np.ndarray, bool]:
+):
     """
     Find the matching amino acids between two peptide sequences.
 
@@ -197,7 +197,7 @@ def aa_match_batch(
     cum_mass_threshold: float = 0.5,
     ind_mass_threshold: float = 0.1,
     mode: str = "best",
-) -> tuple[list[tuple[np.ndarray, bool]], int, int]:
+):
     """
     Find the matching amino acids between multiple pairs of peptide sequences.
 
@@ -252,7 +252,7 @@ def aa_match_metrics(
     aa_matches_batch: list[tuple[np.ndarray, bool]],
     n_aa_true: int,
     n_aa_pred: int,
-) -> tuple[float, float, float]:
+):
     """
     Calculate amino acid and peptide-level evaluation metrics.
 
@@ -293,7 +293,7 @@ def aa_precision_recall(
     aa_scores_all: list[float],
     n_aa_total: int,
     threshold: float,
-) -> tuple[float, float]:
+):
     """
     Calculate amino acid level precision and recall at a given score threshold.
 
