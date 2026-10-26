@@ -228,6 +228,7 @@ class BeamStat:
         self.current_step = 1
         self.cache = None
         self._temp_active_cache = None
+        self._parent_global = None
 
     @property
     def active(self):
@@ -525,12 +526,9 @@ class BeamStat:
             self.current.cumsum_scores,
         )
 
-        if self._temp_active_cache is not None:
-            global_order = batch_idx * self.size.beam_size + row
-            global_to_active_map = torch.clamp(torch.cumsum(self.flag.active.long(), dim=0) - 1, min=0)
-            active_order = global_to_active_map[global_order]
-            self.cache = self._temp_active_cache.reorder(active_order)
-            self._temp_active_cache = None
+        # Parent slot of every beam slot; consumed by BirdirectBeamStat to
+        # compact the caches in one gather
+        self._parent_global = batch_idx * self.size.beam_size + row
 
     def update(self, active_log_logits: torch.FloatTensor, active_cache: Cache):
         active_idx = self.flag.active.nonzero(as_tuple=True)[0]
@@ -635,9 +633,39 @@ class BirdirectBeamStat:
             rev_log_logits,
             rev_cache
         )
-    
+
+        # Caches start B*S-ordered; compact to the post-init union rows
+        B = self.fwd_stat.size.batch_size
+        S = self.fwd_stat.size.beam_size
+        self._compact_caches(torch.ones(B * S, dtype=torch.bool, device=self.fwd_stat.device))
+
     def is_done(self):
         return (not self.fwd_stat.active.any()) & (not self.rev_stat.active.any())
+
+    def _compact_caches(self, prev_union: torch.BoolTensor):
+        # Re-gather both caches in one pass to the next step's union rows:
+        # each live slot pulls its parent's row, replacing the three separate
+        # materializations (union filter, per-direction filter, B*S re-expand)
+        next_union = self.fwd_stat.active | self.rev_stat.active
+        if not next_union.any():
+            for stat in (self.fwd_stat, self.rev_stat):
+                if stat._temp_active_cache is not None:
+                    stat.cache = stat._temp_active_cache
+                    stat._temp_active_cache = None
+            return
+
+        # Row index of every global slot in the current (prev_union-ordered) cache
+        cur_row = torch.clamp(torch.cumsum(prev_union.long(), dim=0) - 1, min=0)
+        next_slots = next_union.nonzero(as_tuple=True)[0]
+        for stat in (self.fwd_stat, self.rev_stat):
+            if stat._temp_active_cache is not None:
+                src = cur_row[stat._parent_global][next_slots]
+                stat.cache = stat._temp_active_cache.reorder(src)
+                stat._temp_active_cache = None
+            else:
+                # Direction idle this step: keep each slot's own row
+                src = cur_row[next_slots]
+                stat.cache = stat.cache.reorder(src)
 
     def update(
         self,
@@ -652,15 +680,17 @@ class BirdirectBeamStat:
         if self.fwd_stat.active.any():
             self.fwd_stat.update(
                 fwd_active_log_logits[fwd_mask],
-                fwd_active_cache.filter_by_mask(fwd_mask)
+                fwd_active_cache
             )
-        
+
         if self.rev_stat.active.any():
             self.rev_stat.update(
                 rev_active_log_logits[rev_mask],
-                rev_active_cache.filter_by_mask(rev_mask)
+                rev_active_cache
             )
-    
+
+        self._compact_caches(active_final)
+
     def get_next_input(self):
         fwd_tokens = self.fwd_stat.get_next_input()
         rev_tokens = self.rev_stat.get_next_input()
@@ -670,8 +700,8 @@ class BirdirectBeamStat:
             fwd_tokens[active_final],
             rev_tokens[active_final],
             active_final,
-            self.fwd_stat.cache.filter_by_mask(active_final),
-            self.rev_stat.cache.filter_by_mask(active_final),
+            self.fwd_stat.cache,
+            self.rev_stat.cache,
         )
     
     def get_best_peptide(self):
@@ -714,7 +744,11 @@ def beam_search(
         init_rev_cache
     )
     
-    mem_hidden_states = torch.repeat_interleave(mem_hidden_states, inference_config.num_beams, dim=0)
+    # With the cross cache active the decoder never reads the memory hidden
+    # states, skip the beam repeat and the per-step gather entirely
+    step_needs_mem = not init_cache.has_cross_cache()
+    if step_needs_mem:
+        mem_hidden_states = torch.repeat_interleave(mem_hidden_states, inference_config.num_beams, dim=0)
     mem_attention_mask = torch.repeat_interleave(mem_attention_mask, inference_config.num_beams, dim=0)
     
     for _ in range(inference_config.max_len):
@@ -730,10 +764,11 @@ def beam_search(
             return_self_cache=input.fwd_cache.has_self_cache(),
         )
 
+        step_mem = mem_hidden_states[input.active] if step_needs_mem else None
         output, output_reverse = model.step(
             input.fwd_tokens,
             input.rev_tokens,
-            mem_hidden_states[input.active],
+            step_mem,
             mem_attention_mask[input.active],
             input.fwd_cache,
             input.rev_cache,
@@ -762,11 +797,6 @@ def beam_search(
         rev_mass
     )
 
-    fwd_scores = result.fwd.scores.cpu().numpy()
-    rev_scores = result.rev.scores.cpu().numpy()
-    fwd_fits = result.fwd.mass_fits.cpu().numpy()
-    rev_fits = result.rev.mass_fits.cpu().numpy()
-
     fwd_token_logprobs = _format_token_logprobs(
         result.fwd.logprobs.cpu().numpy(), result.fwd.lengths.cpu().numpy()
     )
@@ -779,11 +809,11 @@ def beam_search(
     return SearchResult(
         fwd_mz.cpu().numpy(),
         rev_mz.cpu().numpy(),
-        fwd_fits,
-        rev_fits,
-        fwd_scores,
+        result.fwd.mass_fits.cpu().numpy(),
+        result.rev.mass_fits.cpu().numpy(),
+        result.fwd.scores.cpu().numpy(),
         fwd_peptides,
-        rev_scores,
+        result.rev.scores.cpu().numpy(),
         rev_peptides,
         fwd_token_logprobs,
         rev_token_logprobs,

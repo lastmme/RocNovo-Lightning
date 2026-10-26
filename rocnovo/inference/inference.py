@@ -142,6 +142,12 @@ def generation_streaming(
             if not inference_config.use_self_cache:
                 init_cache = init_cache.without_self_cache()
                 init_rev_cache = init_rev_cache.without_self_cache()
+            elif init_cache is not None:
+                # The prompt is only consumed on the full-prefix path (no self
+                # cache); with self cache enabled it would be needlessly moved
+                # by every beam reorder
+                init_cache = replace(init_cache, prompt_hidden_states=None)
+                init_rev_cache = replace(init_rev_cache, prompt_hidden_states=None)
 
             if inference_config.num_beams == 0:
                 searched_result = greedy_search(
@@ -186,7 +192,7 @@ def generation_streaming(
                 batch.spectra.precursor.charge.cpu().numpy(),
                 scan_ids,
             )
-            
+
             if mode == "eval":
                 gt_peps = peptide_tokenizer.detokenize_by_array(batch.peptide.tokens.cpu().numpy())
                 item = EvalResult(

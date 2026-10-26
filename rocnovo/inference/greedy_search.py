@@ -56,6 +56,9 @@ def greedy_search(
     step_log_probs_rev = init_rev_log_probs
     cache = init_cache
     cache_reverse = init_rev_cache
+    step_needs_mem = not init_cache.has_cross_cache()
+    if not step_needs_mem:
+        mem_hidden_states = None
 
     current_step = 0
     for step_idx in range(1, max_length + 1):
@@ -88,7 +91,8 @@ def greedy_search(
             active_idx = active_idx[still_active]
             next_token = next_token[still_active]
             next_token_rev = next_token_rev[still_active]
-            mem_hidden_states = mem_hidden_states[still_active]
+            if mem_hidden_states is not None:
+                mem_hidden_states = mem_hidden_states[still_active]
             mem_attention_mask = mem_attention_mask[still_active]
             precursor = precursor.filter_by_mask(still_active)
             cache = cache.filter_by_mask(still_active)
