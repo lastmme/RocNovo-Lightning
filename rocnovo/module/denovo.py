@@ -72,12 +72,12 @@ class Denovo(BaseModule):
         output: model_config.DecoderOutput
         output_reverse: model_config.DecoderOutput
 
-        if cache is not None and not cache.has_self_cache():
+        if cache is None or not cache.has_self_cache():
             step_tokens = tokens
         else:
             step_tokens = tokens[:, [-1]]
-        
-        if cache_reverse is not None and not cache_reverse.has_self_cache():
+
+        if cache_reverse is None or not cache_reverse.has_self_cache():
             step_tokens_reverse = tokens_reverse
         else:
             step_tokens_reverse = tokens_reverse[:, [-1]]

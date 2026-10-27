@@ -243,6 +243,41 @@ class CrossAttention(nn.Module):
         cache_return_config: model_config.OutputConfig=model_config.default_output_config
     ):
         q = self.query(hidden_states)
+
+        # Beam decode with a compacted row layout: score every beam slot
+        # against its sample's memory through broadcasting, avoiding the
+        # per-row K/V gathers entirely
+        if cross_kv is not None and cross_kv.slots is not None:
+            n_head, d_head = self.n_head, self.d_head
+            B = cross_kv.key.size(0)
+            S = cross_kv.beam_size
+            n, seq_len, hidden = q.shape
+            q_pad = q.new_zeros(B * S, seq_len, hidden)
+            q_pad[cross_kv.slots] = q
+            q4 = q_pad.view(B, S, seq_len, n_head, d_head).permute(0, 1, 3, 2, 4)
+
+            scores = torch.einsum(
+                "bshqd,bhtd->bshtq",
+                q4 * d_head ** -0.5,
+                cross_kv.key,
+            )
+            if mem_attention_mask is not None:
+                # Row-aligned mask [N, P]; scatter into the beam-slot grid and
+                # align P with the t axis of scores [B, S, h, t, q]
+                m_pad = mem_attention_mask.new_zeros(B * S, mem_attention_mask.shape[-1])
+                m_pad[cross_kv.slots] = mem_attention_mask
+                keep = m_pad.view(B, S, 1, -1).unsqueeze(-1)
+                scores = scores.masked_fill(~keep, float("-inf"))
+            probs = torch.softmax(scores.float(), dim=3).to(q.dtype)
+            out = torch.einsum("bshtq,bhtd->bshqd", probs, cross_kv.value)
+            atten_output = out.permute(0, 1, 3, 2, 4).reshape(B * S, seq_len, hidden)
+            atten_output = atten_output[cross_kv.slots]
+
+            return model_config.AttentionOutput(
+                atten_output=atten_output,
+                cross_key_value=None
+            )
+
         if cross_kv is not None:
             if cross_kv_index is not None:
                 k = cross_kv.key[cross_kv_index]

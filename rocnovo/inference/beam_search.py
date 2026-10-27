@@ -577,11 +577,11 @@ class BeamStat:
         self.current_step += 1
 
     def get_next_input(self):
-        # Cache reordering is applied in _write_current, so self.cache is always
-        # in the current B*S logical order.  This method only prepares the input
-        # tokens.
+        # Tokens are returned in B*S slot order; BirdirectBeamStat gathers them
+        # by the union mask to align with the compacted cache rows. Cache
+        # compaction happens in BirdirectBeamStat._compact_caches.
 
-        if self.cache is not None and not self.cache.has_self_cache():
+        if self.cache is None or not self.cache.has_self_cache():
             # Without self KV cache we must recompute self attention over the
             # full prefix generated so far. current_step has already been
             # advanced, so the prefix is everything before it.
@@ -657,6 +657,8 @@ class BirdirectBeamStat:
         # Row index of every global slot in the current (prev_union-ordered) cache
         cur_row = torch.clamp(torch.cumsum(prev_union.long(), dim=0) - 1, min=0)
         next_slots = next_union.nonzero(as_tuple=True)[0]
+        S = self.fwd_stat.size.beam_size
+        sample_of_row = next_slots // S
         for stat in (self.fwd_stat, self.rev_stat):
             if stat._temp_active_cache is not None:
                 src = cur_row[stat._parent_global][next_slots]
@@ -666,6 +668,16 @@ class BirdirectBeamStat:
                 # Direction idle this step: keep each slot's own row
                 src = cur_row[next_slots]
                 stat.cache = stat.cache.reorder(src)
+            if stat.cache.cross_kv_cache is not None:
+                # Broadcast cross-attention layout: row -> beam slot mapping
+                stat.cache = replace(
+                    stat.cache,
+                    cross_kv_index=sample_of_row,
+                    cross_kv_cache=[
+                        replace(kv, slots=next_slots, beam_size=S)
+                        for kv in stat.cache.cross_kv_cache
+                    ],
+                )
 
     def update(
         self,
