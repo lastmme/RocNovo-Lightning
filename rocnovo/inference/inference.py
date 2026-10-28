@@ -3,7 +3,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 from pathlib import Path
 from typing import Literal
-from dataclasses import asdict, replace, fields
+from dataclasses import asdict, replace
 
 import pytorch_lightning as pl
 import torch

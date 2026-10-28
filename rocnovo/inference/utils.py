@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from dataclasses import dataclass, fields, asdict, replace
 
 import torch
@@ -409,6 +412,33 @@ def _estimate_analytical_memory(
 
     return persistent + activation + beam_buffer
 
+def _bs_cache_determinants(
+    device: torch.device,
+    num_beams: int,
+    vocab_size: int,
+    max_length: int,
+    num_peaks: int,
+    gradscaler_enabled: bool,
+    use_cross_cache: bool,
+    use_self_cache: bool,
+    alignment: int,
+):
+    # Every input the estimate depends on; entries whose determinants all
+    # match can reuse the cached batch size
+    return {
+        "version": 2,
+        "device": torch.cuda.get_device_name(device),
+        "device_index": device.index,
+        "num_beams": num_beams,
+        "vocab_size": vocab_size,
+        "max_length": max_length,
+        "num_peaks": num_peaks,
+        "gradscaling_enabled": gradscaler_enabled,
+        "use_cross_cache": use_cross_cache,
+        "use_self_cache": use_self_cache,
+        "alignment": alignment,
+    }
+
 def estimate_analytical_batch_size(
     model: Denovo,
     num_beams: int,
@@ -419,19 +449,89 @@ def estimate_analytical_batch_size(
     device: torch.device = torch.device("cuda:0"),
     use_cross_cache: bool = True,
     use_self_cache: bool = True,
-    static_overhead_gb: float = 0.5,
-    safety_margin: float = 0.05,
+    alignment: int = 8,
+    max_probes: int = 6,
+):
+    import json
+    determinants = _bs_cache_determinants(
+        device, num_beams, vocab_size, max_length, num_peaks,
+        gradscaler_enabled, use_cross_cache, use_self_cache, alignment,
+    )
+    cache_path = Path.home() / ".cache" / "rocnovo" / "batch_size_cache.json"
+
+    def _load_cache():
+        try:
+            cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+            if isinstance(cache.get("entries"), list):
+                return cache
+        except Exception:
+            pass
+        return {"entries": []}
+
+    def _matches(entry):
+        return all(entry.get(k) == v for k, v in determinants.items())
+
+    if device.type == "cuda" and not os.environ.get("ROCNOVO_NO_BS_CACHE"):
+        free_vram, _ = torch.cuda.mem_get_info(device)
+        for entry in _load_cache()["entries"]:
+            if _matches(entry) and free_vram >= entry["free_vram"] - (1 << 30):
+                logger.debug(f"Batch size cache hit: {entry['batch_size']}")
+                return entry["batch_size"]
+
+    batch_size, free_vram = _estimate_batch_size_uncached(
+        model, num_beams, vocab_size, max_length, num_peaks,
+        gradscaler_enabled, device, use_cross_cache, use_self_cache,
+        alignment, max_probes,
+    )
+
+    # Persist as readable structured JSON; free_vram is the value measured
+    # BEFORE any probe ran, so the hit guard compares clean against clean
+    if device.type == "cuda" and not os.environ.get("ROCNOVO_NO_BS_CACHE") and batch_size > 1:
+        cache = _load_cache()
+        cache["entries"] = [
+            e for e in cache["entries"] if not _matches(e)
+        ] + [{**determinants, "batch_size": batch_size, "free_vram": free_vram}]
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache, indent=2))
+        except Exception:
+            pass
+    return batch_size
+
+def _estimate_batch_size_uncached(
+    model: Denovo,
+    num_beams: int,
+    vocab_size: int,
+    max_length: int,
+    num_peaks: int = 300,
+    gradscaler_enabled: bool = True,
+    device: torch.device = torch.device("cuda:0"),
+    use_cross_cache: bool = True,
+    use_self_cache: bool = True,
     alignment: int = 8,
     max_probes: int = 6,
 ):
     if device.type != "cuda":
-        return 64
+        return 64, 0
 
     torch.cuda.empty_cache()
     free_vram, _ = torch.cuda.mem_get_info(device)
 
-    static_overhead = static_overhead_gb * (1024 ** 3)
-    target_vram = max(0, free_vram - static_overhead) * (1.0 - safety_margin)
+    # The safety margin is derived from the estimator's own evidence instead
+    # of per-mode constants: 2x the relative fit residual of the calibration
+    # probes, the worst prediction-vs-probe disagreement seen during
+    # validation, plus a single run-variance prior for the batch-to-batch
+    # spread of real data that no probe can observe (the heaviest real batch
+    # runs ~4% above the synthetic probe peak; measured on a 100+ batch run).
+    # One identical rule for greedy and beam search alike.
+    RUN_VARIANCE_PRIOR = 0.14
+    static_overhead = 0.5 * (1024 ** 3)
+    margin = RUN_VARIANCE_PRIOR
+
+    def _target_vram():
+        return max(0, free_vram - static_overhead) * (1.0 - margin)
+
+    target_vram = _target_vram()
 
     logger.debug(
         f"Estimating batch size: free_vram={free_vram/1e9:.2f}GB, "
@@ -439,9 +539,10 @@ def estimate_analytical_batch_size(
         f"use_cross_cache={use_cross_cache}, use_self_cache={use_self_cache}"
     )
 
-    # Calibrate the analytical formula with two probes. The larger second
-    # point reduces the relative noise of the fitted slope.
-    calibration_batches = (4, 16)
+    # Calibrate the analytical formula with three probes: two small ones for
+    # the fixed overhead plus a larger one that pins the slope, leaving a
+    # residual-based sigma for the adaptive margin.
+    calibration_batches = (4, 16, 96)
     measured_peaks = []
     for calibration_batch in calibration_batches:
         try:
@@ -461,7 +562,7 @@ def estimate_analytical_batch_size(
                 f"Calibration probe (batch={calibration_batch}) OOMed: {e}. "
                 "Falling back to batch size 1."
             )
-            return 1
+            return 1, free_vram
 
         measured_peaks.append(peak)
 
@@ -480,21 +581,40 @@ def estimate_analytical_batch_size(
         for b in calibration_batches
     ]
 
-    # Fit measured_peak = fixed + slope * batch_size. The analytical slope is
-    # a lower bound: it covers the beam buffers that the probes do not touch.
-    measured_slope = (
-        measured_peaks[1] - measured_peaks[0]
-    ) / (calibration_batches[1] - calibration_batches[0])
+    # Fit measured_peak = fixed + slope * batch_size by least squares over
+    # all calibration points. The analytical slope is a lower bound: it covers
+    # the beam buffers that the probes do not touch. The relative fit
+    # residual feeds the adaptive margin.
+    n_pts = len(calibration_batches)
+    b_mean = sum(calibration_batches) / n_pts
+    p_mean = sum(measured_peaks) / n_pts
+    sxx = sum((b - b_mean) ** 2 for b in calibration_batches)
+    sxy = sum(
+        (b - b_mean) * (p - p_mean)
+        for b, p in zip(calibration_batches, measured_peaks)
+    )
+    fit_slope = sxy / sxx
+    fit_fixed = p_mean - fit_slope * b_mean
+    ssr = sum(
+        (p - (fit_fixed + fit_slope * b)) ** 2
+        for b, p in zip(calibration_batches, measured_peaks)
+    )
+    sigma_rel = (
+        (ssr / max(n_pts - 2, 1)) ** 0.5 / max(p_mean, 1)
+    )
     analytical_slope = (
-        analytical_peaks[1] - analytical_peaks[0]
-    ) / (calibration_batches[1] - calibration_batches[0])
-    slope_per_batch = max(measured_slope, analytical_slope)
-    fixed_overhead = max(0, measured_peaks[0] - slope_per_batch * calibration_batches[0])
+        analytical_peaks[-1] - analytical_peaks[0]
+    ) / (calibration_batches[-1] - calibration_batches[0])
+    slope_per_batch = max(fit_slope, analytical_slope)
+    fixed_overhead = max(0, fit_fixed)
 
+    margin = min(0.15, max(0.08, 2 * sigma_rel + RUN_VARIANCE_PRIOR))
+    target_vram = _target_vram()
     logger.debug(
-        f"Calibration: measured_slope={measured_slope/1e6:.3f}MB/batch, "
+        f"Calibration: slope={fit_slope/1e6:.3f}MB/batch (fit), "
         f"analytical_slope={analytical_slope/1e6:.3f}MB/batch, "
-        f"fixed_overhead={fixed_overhead/1e9:.3f}GB"
+        f"fixed_overhead={fixed_overhead/1e9:.3f}GB, "
+        f"sigma_rel={sigma_rel:.4f}, margin={margin:.3f}"
     )
 
     def _align_down(b: int):
@@ -502,7 +622,7 @@ def estimate_analytical_batch_size(
 
     if slope_per_batch <= 0:
         logger.warning("Non-positive slope; using conservative default.")
-        return alignment
+        return alignment, free_vram
 
     candidate = _align_down((target_vram - fixed_overhead) / slope_per_batch)
 
@@ -536,6 +656,21 @@ def estimate_analytical_batch_size(
                 candidate = _align_down((lo + hi) / 2)
             continue
 
+        # Fold the prediction-vs-probe disagreement at real scale into the
+        # adaptive margin before judging this probe against the headroom
+        predicted = fixed_overhead + slope_per_batch * candidate
+        delta_rel = abs(peak - predicted) / max(peak, 1)
+        new_margin = min(
+            0.15, max(0.08, 2 * sigma_rel + delta_rel + RUN_VARIANCE_PRIOR)
+        )
+        if new_margin > margin:
+            margin = new_margin
+            target_vram = _target_vram()
+            logger.debug(
+                f"Margin widened to {margin:.3f} "
+                f"(probe disagrees with model by {delta_rel:.4f})"
+            )
+
         # A probe that exceeds the target headroom is treated like an OOM:
         # shrink until the measured peak fits within target_vram.
         if peak > target_vram:
@@ -558,8 +693,9 @@ def estimate_analytical_batch_size(
         # Refit the slope with the validated large-batch point, then look
         # upward while the projected peak stays within target_vram.
         if candidate > calibration_batches[-1]:
-            measured_slope = (peak - measured_peaks[0]) / (candidate - calibration_batches[0])
-            slope_per_batch = max(slope_per_batch, measured_slope)
+            slope_per_batch = max(
+                slope_per_batch, (peak - fit_fixed) / candidate
+            )
 
         next_candidate = _align_down((target_vram - fixed_overhead) / slope_per_batch)
         if hi is not None:
@@ -570,7 +706,7 @@ def estimate_analytical_batch_size(
             break
         candidate = next_candidate
 
-    return max(lo, 1)
+    return max(lo, 1), free_vram
 
 def _format_three_line_table(headers: list[str], rows: list[list[str]]):
     """Return a Markdown-style three-line table as a string."""
