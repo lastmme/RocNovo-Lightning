@@ -98,7 +98,7 @@ def create_tb_checkpoint_dir(trainer_config: train_configs.TrainerConfig):
     logger.debug(f"Create model save folder: {trainer_config.model_save_folder}")
     Path(trainer_config.model_save_folder).mkdir(parents=True, exist_ok=True)
 
-def get_unique_log_dir(base: str) -> str:
+def get_unique_log_dir(base: str):
     if not os.path.exists(base):
         return base
 

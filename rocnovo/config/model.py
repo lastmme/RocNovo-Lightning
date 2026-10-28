@@ -7,10 +7,14 @@ import torch
 class KVCache:
     key: torch.Tensor # [batch, n_head, seq, d_head]
     value: torch.Tensor # [batch, n_head, seq, d_head]
-    
+    # Cross-cache only: global beam slot id of each compact row and the beam
+    # width, enabling broadcast cross-attention without row gathers
+    slots: Optional[torch.LongTensor]=None
+    beam_size: int=0
+
     def past_length(self):
         return self.key.shape[2]
-    
+
     def repeat_for_beam(self, beam_size: int):
         return replace(
             self,
@@ -63,10 +67,10 @@ class Cache:
         
         return self.kv_cache[idx]
     
-    def has_self_cache(self) -> bool:
+    def has_self_cache(self):
         return self.kv_cache is not None and len(self.kv_cache) > 0
 
-    def has_cross_cache(self) -> bool:
+    def has_cross_cache(self):
         return self.cross_kv_cache is not None and len(self.cross_kv_cache) > 0
 
     def without_self_cache(self):

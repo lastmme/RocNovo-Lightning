@@ -74,7 +74,7 @@ def _prepare_spectra_from_items(items: list[SpectrumItem]):
 def spectra_collate_fn(batch: list[SpectrumItem]):
     return _prepare_spectra_from_items(batch)
 
-def denovo_collate_fn(batch: list[DeNovoItem]) -> TrainBatch:
+def denovo_collate_fn(batch: list[DeNovoItem]):
     inference_batch = _prepare_spectra_from_items(batch)
     peptide_tokens, = _pluck(batch, "peptide_tokens")
     peptide_tokens = pad_sequence(
@@ -91,7 +91,7 @@ def denovo_collate_fn(batch: list[DeNovoItem]) -> TrainBatch:
         )
     )
 
-def bidirect_denovo_collate_fn(batch: list[BiDirectDeNovoItem]) -> BidirectTrainBatch:
+def bidirect_denovo_collate_fn(batch: list[BiDirectDeNovoItem]):
     inference_batch = _prepare_spectra_from_items(batch)
     peptide_tokens, peptide_tokens_reverse = _pluck(
         batch,
@@ -123,7 +123,7 @@ def bidirect_denovo_collate_fn(batch: list[BiDirectDeNovoItem]) -> BidirectTrain
         inference_batch.scan_id,
     )
 
-def dbsearch_collate_fn(batch: list[DBSearchItem]) -> DBSearchBatch:
+def dbsearch_collate_fn(batch: list[DBSearchItem]):
     processed_batch = bidirect_denovo_collate_fn(batch)
     spectrum_ids, = _pluck(batch, "real_spectrum_idx")
 

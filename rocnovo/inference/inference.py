@@ -3,7 +3,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 from pathlib import Path
 from typing import Literal
-from dataclasses import asdict, replace, fields
+from dataclasses import asdict, replace
 
 import pytorch_lightning as pl
 import torch
@@ -13,7 +13,6 @@ from tqdm import tqdm
 from rocnovo.common.io import load_yaml, normalize_path
 from rocnovo.common.logger import logger
 from rocnovo.config.model import OutputConfig, Cache
-from rocnovo.config.model import OutputConfig
 import rocnovo.config.tokenizer as tokenizer_config
 from rocnovo.common.utils import load_denovo_from_checkpoint
 from rocnovo.config.data import DataConfig, BidirectTrainBatch, InferenceBatch
@@ -29,7 +28,6 @@ from rocnovo.inference.utils import (
     resolve_bidirectional_predictions,
 )
 from rocnovo.module.denovo import Denovo
-from rocnovo.common.logger import logger
 from rocnovo.tokenizer.spectrum import SpectrumTokenizer
 from rocnovo.tokenizer.peptide import PTMPeptideTokenizer, SOS, PAD, SPECIAL_TOKENS
 from rocnovo.data.dataloaders import BiDirectDeNovoDataLoaderModule, SpectraDataLoaderModule
@@ -51,6 +49,9 @@ def generation_streaming(
     gt_peptides: list[str] = []
     pred_scores: list[float] = []
     first_batch = True
+    n_done_spectra = 0
+    start_time = time.time()
+    log_every_n_batches = 25
 
     metadata = _prepare_token_metadata(
         peptide_tokenizer,
@@ -63,11 +64,16 @@ def generation_streaming(
 
     autocast_enabled = inference_config.gradscaling_enabled and device.type == "cuda"
     autocast_device = device.type if device.type in ("cuda", "cpu") else "cpu"
+
     with torch.amp.autocast(device_type=autocast_device, dtype=torch.bfloat16, enabled=autocast_enabled):
-        for _, batch in enumerate(tqdm(data_module.test_dataloader(), desc=progressbar_desc, dynamic_ncols=True)):
+        dataloader = data_module.test_dataloader()
+        n_batches = len(dataloader)
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc=progressbar_desc, dynamic_ncols=True)):
             batch: BidirectTrainBatch | InferenceBatch
             batch = batch.to(device)
+
             batch_size = batch.spectra.mz.shape[0]
+            n_done_spectra += batch_size
             scan_ids = [""] * batch_size if batch.scan_id is None else batch.scan_id
 
             mem_hidden_states, mem_attention_mask = model.encode_spectrum(batch.spectra)
@@ -136,6 +142,12 @@ def generation_streaming(
             if not inference_config.use_self_cache:
                 init_cache = init_cache.without_self_cache()
                 init_rev_cache = init_rev_cache.without_self_cache()
+            elif init_cache is not None:
+                # The prompt is only consumed on the full-prefix path (no self
+                # cache); with self cache enabled it would be needlessly moved
+                # by every beam reorder
+                init_cache = replace(init_cache, prompt_hidden_states=None)
+                init_rev_cache = replace(init_rev_cache, prompt_hidden_states=None)
 
             if inference_config.num_beams == 0:
                 searched_result = greedy_search(
@@ -168,15 +180,19 @@ def generation_streaming(
             item = DenovoResult(
                 searched_result.fwd_mz,
                 searched_result.rev_mz,
+                searched_result.fwd_mass_fit,
+                searched_result.rev_mass_fit,
                 searched_result.fwd_score,
                 searched_result.fwd_peptide,
                 searched_result.rev_score,
                 searched_result.rev_peptide,
+                searched_result.fwd_token_logprobs,
+                searched_result.rev_token_logprobs,
                 batch.spectra.precursor.mz.cpu().numpy(),
                 batch.spectra.precursor.charge.cpu().numpy(),
                 scan_ids,
             )
-            
+
             if mode == "eval":
                 gt_peps = peptide_tokenizer.detokenize_by_array(batch.peptide.tokens.cpu().numpy())
                 item = EvalResult(
@@ -199,13 +215,22 @@ def generation_streaming(
             pred_peptides.extend(resolved.pred_peptide)
             pred_scores.extend(resolved.pred_score.tolist())
 
+            if (batch_idx + 1) % log_every_n_batches == 0:
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"{progressbar_desc}: {batch_idx + 1}/{n_batches} batches, "
+                    f"{n_done_spectra} spectra, {n_done_spectra / elapsed:.1f} spectra/s, "
+                    f"elapsed {elapsed:.1f}s"
+                )
+
     if mode == "eval" and pred_peptides:
         _log_eval_summary(
             pred_peptides,
             gt_peptides,
             pred_scores,
             peptide_tokenizer,
-            species_name
+            species_name,
+            progress_bar=inference_config.metrics_progress_bar,
         )
 
 class DenovoPredictor:
@@ -238,25 +263,28 @@ class DenovoPredictor:
         self.model.eval()
 
     def _build_data_module(self, hdf5_path: Path):
-        estimated_batch_size = estimate_analytical_batch_size(
-            self.model,
-            self.inference_config.num_beams,
-            self.peptide_tokenizer.vocab_size,
-            self.inference_config.max_len + 1,
-            self.config["tokenizer"]["spectrum"]["n_top_peaks"],
-            self.inference_config.gradscaling_enabled,
-            self.device,
-            self.inference_config.use_cross_cache,
-            self.inference_config.use_self_cache,
-        )
+        if self.inference_config.auto_batch_size:
+            test_batch_size = estimate_analytical_batch_size(
+                self.model,
+                self.inference_config.num_beams,
+                self.peptide_tokenizer.vocab_size,
+                self.inference_config.max_len + 1,
+                self.config["tokenizer"]["spectrum"]["n_top_peaks"],
+                self.inference_config.gradscaling_enabled,
+                self.device,
+                self.inference_config.use_cross_cache,
+                self.inference_config.use_self_cache,
+            )
+        else:
+            test_batch_size = self.config["data"]["test_batch_size"]
         logger.debug(f"num_beams >= 1 means number of beams in beam search, 0 means greedy search")
-        logger.debug(f"Estimated prediction batch size: {estimated_batch_size} with num_beams: {self.inference_config.num_beams}")
+        logger.debug(f"Prediction batch size: {test_batch_size} with num_beams: {self.inference_config.num_beams}")
 
         data_config = DataConfig(**self.config["data"])
         data_config = replace(
             data_config,
             test_path=str(hdf5_path),
-            test_batch_size=estimated_batch_size
+            test_batch_size=test_batch_size
         )
         if self.mode == "eval":
             return BiDirectDeNovoDataLoaderModule(
@@ -274,8 +302,11 @@ class DenovoPredictor:
         hdf5_path = normalize_path(hdf5_path)
         output_csv = normalize_path(output_csv)
         output_csv.parent.mkdir(parents=True, exist_ok=True)
+        partial_csv = output_csv.with_name(output_csv.name + ".partial")
         if output_csv.exists():
             output_csv.unlink()
+        if partial_csv.exists():
+            partial_csv.unlink()
 
         desc = task_name or hdf5_path.stem
         info = f"greedy search" if self.inference_config.num_beams == 0 else f"beam search beam size: {self.inference_config.num_beams}"
@@ -290,10 +321,11 @@ class DenovoPredictor:
             self.peptide_tokenizer,
             self.inference_config,
             self.device,
-            output_csv,
+            partial_csv,
             progressbar_desc=desc,
             species_name=desc,
         )
+        os.replace(partial_csv, output_csv)
         end = time.time()
         logger.info(f"Task {desc} End! It consumes {end - start:.3f} seconds")
         return output_csv

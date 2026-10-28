@@ -832,9 +832,10 @@ class DBSearcher:
         save_file: Path,
     ):
         peptide_metadata_file = self.output_dir.joinpath("peptides_metadata.hdf5")
+        partial_file = save_file.with_name(save_file.name + ".partial")
         with h5py.File(candidate_file, "r") as src, h5py.File(
             peptide_metadata_file, "r"
-        ) as meta_h5, h5py.File(save_file, "w") as out:
+        ) as meta_h5, h5py.File(partial_file, "w") as out:
             n_rows = src["spectrum_id"].shape[0]
             chunk_size = (min(100_000, max(n_rows, 1)),)
             out.create_dataset(
@@ -870,6 +871,8 @@ class DBSearcher:
             )
             out.create_dataset("metadata", data=meta, dtype=meta_dtype, chunks=chunk_size)
             out.attrs["n_rows"] = n_rows
+
+        os.replace(partial_file, save_file)
 
     def _clip_prescreen(
         self,
@@ -935,9 +938,11 @@ class DBSearcher:
             inv_order[order] = np.arange(len(order))
             return sorted_meta[inv_order]
 
+        partial_file = save_file.with_name(save_file.name + ".partial")
+
         with h5py.File(candidate_file, "r") as cf, h5py.File(
             peptide_metadata_file, "r"
-        ) as meta_h5, h5py.File(save_file, "w") as h5_out, torch.no_grad(), torch.amp.autocast(
+        ) as meta_h5, h5py.File(partial_file, "w") as h5_out, torch.no_grad(), torch.amp.autocast(
             device_type="cuda",
             dtype=torch.bfloat16,
             enabled=self.inference_config.gradscaling_enabled,
@@ -967,10 +972,10 @@ class DBSearcher:
                     if sid not in spec_to_count:
                         continue
                     
-                    spectrum, precursor_mz, precursor_charge = spec_stream[sid]
-                    spectra_list.append(spectrum)
-                    precursor_mzs.append(precursor_mz)
-                    precursor_charges.append(precursor_charge)
+                    item = spec_stream[sid]
+                    spectra_list.append(item.spectrum)
+                    precursor_mzs.append(item.precursor_mz)
+                    precursor_charges.append(item.precursor_charge)
                     spec_ids_chunk.append(sid)
 
                 if not spectra_list:
@@ -1040,6 +1045,7 @@ class DBSearcher:
 
             buffer.flush()
 
+        os.replace(partial_file, save_file)
         return save_file
 
     def stage2_scoring(
@@ -1066,7 +1072,8 @@ class DBSearcher:
             return save_file
 
         dataloader = datamodule.test_dataloader()
-        with h5py.File(save_file, "w") as h5_file:
+        partial_file = save_file.with_name(save_file.name + ".partial")
+        with h5py.File(partial_file, "w") as h5_file:
             total_rows = len(dataloader.dataset)
             chunk_size = (min(100_000, max(total_rows, 1)),)
             h5_file.create_dataset(
@@ -1139,6 +1146,7 @@ class DBSearcher:
                 if buffer.size > 0:
                     buffer.flush_to_hdf5(h5_file, offset)
 
+        os.replace(partial_file, save_file)
         return save_file
 
     @staticmethod
@@ -1226,7 +1234,9 @@ class DBSearcher:
         if fdr_threshold is not None:
             df = df[(df["q_value"] <= fdr_threshold) & (~df["is_decoy"])]
 
-        df.to_csv(output_tsv, sep="\t", index=False)
+        partial_tsv = output_tsv.with_name(output_tsv.name + ".partial")
+        df.to_csv(partial_tsv, sep="\t", index=False)
+        os.replace(partial_tsv, output_tsv)
         logger.info(f"Top1 denovo results exported to {output_tsv}")
         return output_tsv
 

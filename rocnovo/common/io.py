@@ -14,14 +14,14 @@ def normalize_path(p: str | Path):
     
     return p.absolute().resolve()
 
-def load_yaml(yaml_path: str | Path) -> dict:
+def load_yaml(yaml_path: str | Path):
     yaml_path = normalize_path(yaml_path)
     with open(yaml_path, "r") as f:
         config = yaml.safe_load(f)
     
     return config
 
-def load_pkl(file_path: Path | str) -> dict:
+def load_pkl(file_path: Path | str):
     file_path = normalize_path(file_path)
     with open(file_path, "rb") as f:
         obj = pickle.load(f)

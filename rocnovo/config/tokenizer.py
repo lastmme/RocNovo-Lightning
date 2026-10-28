@@ -13,3 +13,4 @@ class PTMTokenizerConfig:
     max_len: int=128
     reverse: bool=True
     residues: str="massivekb"
+    mapping: dict[str, str] | None=None

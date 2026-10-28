@@ -41,7 +41,7 @@ class SpectrumStream(Dataset):
     def n_peaks(self):
         return self._n_peaks
     
-    def __getitem__(self, idx: int) -> SpectrumItem:
+    def __getitem__(self, idx: int):
         if self.stream_handle is None:
             self.stream_handle = h5py.File(self.h5_path, "r")["0"]
 
@@ -84,7 +84,7 @@ class DeNovoStream(SpectrumStream):
         super().__init__(h5_path, spectrum_tokenizer)
         self.peptide_tokenizer = peptide_tokenizer
     
-    def __getitem__(self, idx: int) -> DeNovoItem:
+    def __getitem__(self, idx: int):
         item = super().__getitem__(idx)
         peptide = self.stream_handle["annotations"][idx].decode()
         peptide_tokens = self.peptide_tokenizer.tokenize(peptide)
@@ -106,7 +106,7 @@ class BiDirectDeNovoStream(SpectrumStream):
         super().__init__(h5_path, spectrum_tokenizer)
         self.peptide_tokenizer = peptide_tokenizer
     
-    def __getitem__(self, idx: int) -> BiDirectDeNovoItem:
+    def __getitem__(self, idx: int):
         item = super().__getitem__(idx)
         peptide = self.stream_handle["annotations"][idx].decode()
         peptide_tokens = self.peptide_tokenizer.tokenize(peptide)
@@ -144,7 +144,7 @@ class DBSearchDataset(Dataset):
     def __len__(self):
         return self.length
     
-    def __getitem__(self, idx: int) -> DBSearchItem:
+    def __getitem__(self, idx: int):
         h5f = self._get_file()
         real_spectrum_idx = h5f["spectrum_id"][idx]
         modified_peptide = h5f["metadata"][idx]["modified_peptide"].decode()
